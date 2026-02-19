@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# run_bot.py - Script pour l'UTILISATEUR avec sauvegarde d'ID
+import sys
+import asyncio
+import builtins
+import os
+import datetime
+import json
+import requests
+import threading
+import time
+from pathlib import Path
+
+print("="*70)
+print("🤖 LANCEUR DU BOT")
+print("="*70)
+
+# ==================== CONFIGURATION ====================
+
+ADMIN_API_URL = "http://10.216.132.49:5000"  # IP de ton serveur
+CHECK_INTERVAL = 60  # Vérification toutes les 60 secondes
+CONFIG_FILE = Path(__file__).parent / "bot_config.json"  # Fichier de sauvegarde
+
+# ==================== GESTION DE LA CONFIGURATION ====================
+
+def load_config():
+    """Charge la configuration sauvegardée"""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_config(android_id):
+    """Sauvegarde l'Android ID"""
+    config = {
+        'android_id': android_id,
+        'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'auto_start': True
+    }
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"✅ Android ID sauvegardé dans {CONFIG_FILE}")
+
+def clear_config():
+    """Supprime la configuration"""
+    if CONFIG_FILE.exists():
+        CONFIG_FILE.unlink()
+        print("🗑️ Configuration effacée")
+
+# ==================== FONCTIONS DE VÉRIFICATION ====================
+
+def verify_with_admin(android_id):
+    """Vérifie l'activation auprès du serveur admin"""
+    try:
+        response = requests.post(f"{ADMIN_API_URL}/verify", json={
+            "android_id": android_id
+        }, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('valid', False), data.get('message'), data.get('time_left')
+        else:
+            return False, f"Erreur de vérification", None
+    except Exception as e:
+        return False, f"Erreur de connexion: {e}", None
+
+def expiration_monitor(android_id):
+    """Surveille l'expiration en arrière-plan"""
+    print(f"⏰ Surveillance d'expiration activée (vérification toutes les {CHECK_INTERVAL}s)")
+    
+    while True:
+        time.sleep(CHECK_INTERVAL)
+        
+        try:
+            valid, message, time_left = verify_with_admin(android_id)
+            
+            if not valid:
+                print("\n" + "!"*70)
+                print("❌ SESSION EXPIRÉE !")
+                print(message)
+                print("Le bot va s'arrêter.")
+                print("Suppression de la configuration...")
+                clear_config()
+                print("!"*70 + "\n")
+                
+                # Arrêt forcé
+                os._exit(1)
+                
+            elif time_left and ("min" in time_left or "0j" in time_left):
+                print(f"⏳ Temps restant: {time_left}")
+                    
+        except:
+            pass
+
+# ==================== PROGRAMME PRINCIPAL ====================
+
+def main():
+    # Charge la configuration existante
+    config = load_config()
+    android_id = config.get('android_id') if config else None
+    
+    # Si pas d'ID sauvegardé, on demande
+    if not android_id:
+        print("\n📝 PREMIÈRE UTILISATION")
+        print("-" * 40)
+        android_id = input("📱 Entrez votre Android ID: ").strip()
+        
+        if not android_id:
+            print("❌ Android ID requis")
+            input("Appuyez sur Entrée pour quitter...")
+            sys.exit(1)
+        
+        # Sauvegarde l'ID
+        save_config(android_id)
+        print("-" * 40)
+    else:
+        print(f"\n📱 Android ID sauvegardé: {android_id}")
+        print(f"📅 Sauvegardé le: {config.get('saved_at')}")
+        print("-" * 40)
+    
+    # Vérification initiale
+    print("\n🔍 VÉRIFICATION DE L'ACTIVATION...")
+    valid, message, time_left = verify_with_admin(android_id)
+    
+    if not valid:
+        print("\n" + "!"*70)
+        print(message)
+        print("\nL'ID sauvegardé n'est plus valide.")
+        print("Suppression de la configuration...")
+        clear_config()
+        print("\nRelancez le programme pour entrer un nouvel ID.")
+        print("!"*70 + "\n")
+        input("Appuyez sur Entrée pour quitter...")
+        sys.exit(1)
+    else:
+        print(f"\n✅ ACTIVATION VALIDE")
+        if time_left:
+            print(f"⏳ Temps restant: {time_left}")
+        print("🎯 Lancement automatique du bot...\n")
+    
+    # Démarre le moniteur d'expiration
+    monitor_thread = threading.Thread(target=expiration_monitor, args=(android_id,), daemon=True)
+    monitor_thread.start()
+    
+    # BYPASS pour éviter les arrêts intempestifs du task.py
+    original_exit = sys.exit
+    sys.exit = lambda *a, **k: None
+    builtins.exit = lambda *a, **k: None
+    builtins.quit = lambda *a, **k: None
+    
+    # Charge et exécute task.py
+    task_path = Path(__file__).parent / "task.py"
+    
+    if not task_path.exists():
+        print(f"❌ Erreur: fichier task.py non trouvé")
+        print(f"Chemin cherché: {task_path}")
+        input("Appuyez sur Entrée pour quitter...")
+        sys.exit(1)
+    
+    try:
+        with open(task_path, 'rb') as f:
+            code = f.read().decode('utf-8', errors='ignore')
+        print("✅ Fichier task.py chargé")
+    except Exception as e:
+        print(f"❌ Erreur: {e}")
+        input("Appuyez sur Entrée pour quitter...")
+        sys.exit(1)
+    
+    # Patch le code
+    lines = code.split('\n')
+    for i, line in enumerate(lines):
+        if 'exec(m.loads(z.decompress(d)))' in line:
+            lines[i] = '''
+try:
+    import marshal as m
+    import zlib as z
+    __decompressed = z.decompress(d)
+    __loaded = m.loads(__decompressed)
+    if __loaded:
+        exec(__loaded)
+except:
+    pass
+'''
+            break
+    
+    patched_code = '\n'.join(lines)
+    
+    # Prépare l'environnement
+    env = {
+        '__name__': '__main__',
+        '__file__': str(task_path),
+        'print': print,
+        'ANDROID_ID': android_id,
+    }
+    
+    # Exécute le code pour charger les fonctions
+    try:
+        exec(patched_code, env)
+    except Exception as e:
+        print(f"⚠️ Warning lors du chargement: {e}")
+    
+    # Cherche une fonction à exécuter
+    async_funcs = ['main', 'run', 'start', 'execute', 'bot', 'client']
+    
+    async def run_async_funcs():
+        for func_name in async_funcs:
+            if func_name in env and callable(env[func_name]):
+                print(f"▶ Lancement de {func_name}()...")
+                try:
+                    if asyncio.iscoroutinefunction(env[func_name]):
+                        # Exécution asynchrone
+                        task = asyncio.create_task(env[func_name]())
+                        
+                        # Boucle de vérification
+                        while not task.done():
+                            await asyncio.sleep(1)
+                            
+                        result = task.result()
+                    else:
+                        # Exécution synchrone
+                        result = env[func_name]()
+                    
+                    print(f"✅ Programme terminé")
+                    return True
+                except Exception as e:
+                    print(f"⚠ Erreur dans {func_name}: {e}")
+        return False
+    
+    # Lance le programme
+    try:
+        sys.exit = original_exit
+        success = asyncio.run(run_async_funcs())
+        
+        if not success:
+            print("\nℹ Aucune fonction principale trouvée dans task.py")
+            print("Le fichier a été chargé mais rien n'a été exécuté")
+            
+    except KeyboardInterrupt:
+        print("\n\n⏹️ Arrêt demandé par l'utilisateur")
+    except Exception as e:
+        print(f"\n❌ Erreur pendant l'exécution: {e}")
+    
+    print("\n" + "="*70)
+    print("Pour relancer le bot, réexécutez simplement : python3 run_bot.py")
+    print("="*70)
+
+if __name__ == "__main__":
+    main()
