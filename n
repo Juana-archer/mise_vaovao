@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# run_bot.py - Version intelligente avec auto-update
-# Pour les utilisateurs de @Juana-archer
+# run_bot.py - Lanceur ultra-robuste avec gestion avancée des erreurs
+# Version 3.0 - Pour les utilisateurs de @Juana-archer
 
 import sys
 import asyncio
@@ -11,312 +11,722 @@ import json
 import requests
 import threading
 import time
+import random
+import socket
 from pathlib import Path
+from typing import Optional, Dict, Any, Tuple, List
 
-print("="*70)
-print("🤖 LANCEUR INTELLIGENT DU BOT")
-print("="*70)
+# ==================== CONFIGURATION AVANCÉE ====================
+GIST_ID = "f2a6edaedf5fef169fb4a1f15833da3c"
+GIST_OWNER = "Juana-archer"
+GIST_URL = f"https://gist.githubusercontent.com/{GIST_OWNER}/{GIST_ID}/raw/gist_config.json"
 
-# ==================== CONFIGURATION AUTOMATIQUE ====================
-# Gist de l'admin @Juana-archer - Mis à jour automatiquement
-GIST_URL = "https://gist.githubusercontent.com/Juana-archer/f2a6edaedf5fef169fb4a1f15833da3c/raw/067d32893a727c0f59c80794e5b9dd000071aa98/gist_config.json"
+# Fichiers de configuration
+CONFIG_DIR = Path(__file__).parent
+CONFIG_FILE = CONFIG_DIR / "bot_config.json"
+CACHE_FILE = CONFIG_DIR / "server_cache.json"
+URL_HISTORY_FILE = CONFIG_DIR / "url_history.txt"
+LOG_FILE = CONFIG_DIR / "bot.log"
+ERROR_LOG_FILE = CONFIG_DIR / "error.log"
 
-CONFIG_FILE = Path(__file__).parent / "bot_config.json"
-CACHE_FILE = Path(__file__).parent / "server_cache.json"
-CHECK_INTERVAL = 60
-MAX_RETRIES = 3
+# Paramètres de robustesse
+CHECK_INTERVAL = 20 * 60  # 20 MINUTES (modifié de 120 à 1200 secondes)
+MAX_RETRIES = 5
+SERVER_TIMEOUT = 8
+CONNECTION_RETRY_DELAY = 5
+MAX_HISTORY_URLS = 20
+HEALTH_CHECK_ENDPOINTS = ["/", "/health", "/status"]
 
-# ==================== FONCTIONS DE MISE À JOUR AUTOMATIQUE ====================
+# ==================== COULEURS (optionnel) ====================
+try:
+    import colorama
+    colorama.init()
+    Colors = type('Colors', (), {
+        'HEADER': '\033[95m',
+        'BLUE': '\033[94m',
+        'CYAN': '\033[96m',
+        'GREEN': '\033[92m',
+        'YELLOW': '\033[93m',
+        'RED': '\033[91m',
+        'MAGENTA': '\033[35m',
+        'BOLD': '\033[1m',
+        'END': '\033[0m'
+    })
+except ImportError:
+    # Pas de couleurs si colorama n'est pas installé
+    Colors = type('Colors', (), {
+        'HEADER': '', 'BLUE': '', 'CYAN': '', 'GREEN': '', 
+        'YELLOW': '', 'RED': '', 'MAGENTA': '', 'BOLD': '', 'END': ''
+    })
 
-def get_server_config():
-    """Récupère la configuration du serveur depuis le Gist de l'admin"""
-    try:
-        print("🌐 Récupération de la configuration serveur...")
-        response = requests.get(GIST_URL, timeout=5)
-        if response.status_code == 200:
-            config = response.json()
-            # Sauvegarde en cache
-            with open(CACHE_FILE, 'w') as f:
-                json.dump(config, f)
-            print(f"✅ Configuration reçue")
-            print(f"📅 Dernière mise à jour: {config.get('last_update', 'inconnue')}")
-            print(f"📱 Admin: {config.get('admin_contact', '@Juana-archer')}")
-            return config
+# ==================== LOGGER ====================
+class Logger:
+    """Système de logging avancé"""
+    
+    @staticmethod
+    def log(message: str, level: str = "INFO"):
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] [{level}] {message}"
+        
+        # Écrire dans le fichier de log
+        try:
+            with open(LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(log_entry + "\n")
+        except:
+            pass
+        
+        # Afficher avec couleur selon le niveau
+        if level == "ERROR":
+            print(f"{Colors.RED}{log_entry}{Colors.END}")
+        elif level == "WARNING":
+            print(f"{Colors.YELLOW}{log_entry}{Colors.END}")
+        elif level == "SUCCESS":
+            print(f"{Colors.GREEN}{log_entry}{Colors.END}")
         else:
-            print("⚠️ Impossible de joindre le serveur de config")
-            return None
-    except Exception as e:
-        print(f"⚠️ Erreur de connexion: {e}")
+            print(log_entry)
+    
+    @staticmethod
+    def error(message: str):
+        Logger.log(message, "ERROR")
+        # Écrire aussi dans error.log
+        try:
+            with open(ERROR_LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.datetime.now()}] {message}\n")
+        except:
+            pass
+    
+    @staticmethod
+    def success(message: str):
+        Logger.log(message, "SUCCESS")
+    
+    @staticmethod
+    def warning(message: str):
+        Logger.log(message, "WARNING")
+
+# ==================== GESTIONNAIRE DE RÉSEAU ====================
+class NetworkManager:
+    """Gère toutes les opérations réseau avec retry et fallback"""
+    
+    @staticmethod
+    def check_internet() -> bool:
+        """Vérifie si la connexion Internet est active"""
+        try:
+            # Test de connexion à plusieurs endpoints fiables
+            test_hosts = ['8.8.8.8', '1.1.1.1', 'github.com']
+            for host in test_hosts:
+                try:
+                    socket.create_connection((host, 80), timeout=3)
+                    return True
+                except:
+                    continue
+            return False
+        except:
+            return False
+    
+    @staticmethod
+    def safe_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
+        """Effectue une requête HTTP avec retry automatique"""
+        default_kwargs = {
+            'timeout': SERVER_TIMEOUT,
+            'headers': {'User-Agent': 'Mozilla/5.0 (compatible; Bot/3.0)'}
+        }
+        default_kwargs.update(kwargs)
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.request(method, url, **default_kwargs)
+                
+                # Log la requête (sans les données sensibles)
+                Logger.log(f"🌐 {method} {url} -> {response.status_code}")
+                
+                return response
+            except requests.exceptions.ConnectionError:
+                if attempt < MAX_RETRIES - 1:
+                    delay = CONNECTION_RETRY_DELAY * (attempt + 1)
+                    Logger.warning(f"Connexion échouée, nouvelle tentative dans {delay}s...")
+                    time.sleep(delay)
+                else:
+                    Logger.error(f"Connexion impossible après {MAX_RETRIES} tentatives: {url}")
+            except requests.exceptions.Timeout:
+                Logger.warning(f"Timeout sur {url}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(CONNECTION_RETRY_DELAY)
+            except Exception as e:
+                Logger.error(f"Erreur requête: {e}")
+                break
+        
+        return None
+    
+    @staticmethod
+    def get_with_fallback(urls: List[str], endpoint: str = "/") -> Optional[str]:
+        """Teste plusieurs URLs et retourne la première qui répond"""
+        for url in urls:
+            full_url = url.rstrip('/') + endpoint
+            response = NetworkManager.safe_request('GET', full_url)
+            
+            if response and response.status_code == 200:
+                Logger.success(f"Serveur actif: {url}")
+                return url
+        
         return None
 
-def load_cached_config():
-    """Charge la configuration depuis le cache local"""
-    try:
-        with open(CACHE_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {"current_url": None, "backup_urls": []}
-
-def find_active_server():
-    """Trouve un serveur actif en testant toutes les URLs"""
-    print("\n🔍 RECHERCHE DU SERVEUR ACTIF")
-    print("-" * 40)
+# ==================== GESTIONNAIRE DE CONFIGURATION ====================
+class ConfigManager:
+    """Gère la configuration et le cache"""
     
-    # Essaie d'abord de récupérer la config en ligne
-    config = get_server_config()
+    @staticmethod
+    def get_server_config() -> Optional[Dict[str, Any]]:
+        """Récupère la configuration depuis le Gist"""
+        if not NetworkManager.check_internet():
+            Logger.warning("Pas de connexion Internet, utilisation du cache")
+            return ConfigManager.load_cached_config()
+        
+        Logger.log("🌐 Récupération de la configuration...")
+        response = NetworkManager.safe_request('GET', GIST_URL)
+        
+        if response and response.status_code == 200:
+            try:
+                config = response.json()
+                
+                # Sauvegarde en cache
+                ConfigManager.save_to_cache(config)
+                
+                # Sauvegarde dans l'historique
+                ConfigManager.save_to_history(config.get('current_url'))
+                
+                Logger.success("Configuration récupérée")
+                return config
+            except json.JSONDecodeError:
+                Logger.error("Format JSON invalide")
+        
+        Logger.warning("Utilisation du cache local")
+        return ConfigManager.load_cached_config()
     
-    if not config:
-        print("📦 Utilisation du cache local")
-        config = load_cached_config()
-    
-    # Construit la liste des URLs à tester
-    urls_to_test = []
-    if config.get('current_url'):
-        urls_to_test.append(config['current_url'])
-        print(f"📌 URL principale: {config['current_url']}")
-    
-    backup_urls = config.get('backup_urls', [])
-    if backup_urls:
-        print(f"📌 URLs de secours: {len(backup_urls)}")
-        urls_to_test.extend(backup_urls)
-    
-    print("-" * 40)
-    
-    # Teste chaque URL
-    for i, url in enumerate(urls_to_test, 1):
-        print(f"🔍 Test {i}/{len(urls_to_test)}: {url[:50]}...")
+    @staticmethod
+    def save_to_cache(config: Dict[str, Any]):
+        """Sauvegarde la config dans le cache"""
         try:
-            response = requests.get(f"{url}/", timeout=3)
-            if response.status_code == 200:
-                print(f"✅ SERVEUR TROUVÉ !")
-                print(f"   → {url}")
-                return url
-        except:
-            continue
+            with open(CACHE_FILE, 'w') as f:
+                json.dump({
+                    'config': config,
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'version': '3.0'
+                }, f, indent=2)
+        except Exception as e:
+            Logger.error(f"Impossible de sauvegarder le cache: {e}")
     
-    return None
-
-# ==================== FONCTIONS EXISTANTES ====================
-
-def load_config():
-    if CONFIG_FILE.exists():
+    @staticmethod
+    def load_cached_config() -> Dict[str, Any]:
+        """Charge la config depuis le cache"""
+        default_config = {
+            "current_url": None,
+            "backup_urls": [],
+            "admin_contact": "@Juana-archer",
+            "last_update": "inconnue"
+        }
+        
         try:
-            with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_config(android_id, server_url):
-    config = {
-        'android_id': android_id,
-        'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'server_url': server_url
-    }
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
-    print(f"✅ Configuration sauvegardée")
-
-def clear_config():
-    if CONFIG_FILE.exists():
-        CONFIG_FILE.unlink()
-        print("🗑️ Configuration effacée")
-
-def verify_with_admin(server_url, android_id):
-    for attempt in range(MAX_RETRIES):
+            if CACHE_FILE.exists():
+                with open(CACHE_FILE, 'r') as f:
+                    data = json.load(f)
+                    return data.get('config', default_config)
+        except Exception as e:
+            Logger.error(f"Erreur chargement cache: {e}")
+        
+        return default_config
+    
+    @staticmethod
+    def save_to_history(url: Optional[str]):
+        """Sauvegarde l'URL dans l'historique"""
+        if not url:
+            return
+        
         try:
-            response = requests.post(
-                f"{server_url}/verify", 
+            # Lit l'historique existant
+            history = []
+            if URL_HISTORY_FILE.exists():
+                with open(URL_HISTORY_FILE, 'r') as f:
+                    history = f.read().splitlines()
+            
+            # Ajoute la nouvelle URL avec timestamp
+            entry = f"{datetime.datetime.now().isoformat()} | {url}"
+            history.insert(0, entry)
+            
+            # Garde seulement les MAX_HISTORY_URLS plus récentes
+            history = history[:MAX_HISTORY_URLS]
+            
+            # Sauvegarde
+            with open(URL_HISTORY_FILE, 'w') as f:
+                f.write("\n".join(history))
+        except Exception as e:
+            Logger.error(f"Erreur sauvegarde historique: {e}")
+    
+    @staticmethod
+    def load_user_config() -> Dict[str, Any]:
+        """Charge la configuration utilisateur"""
+        default_config = {
+            'android_id': None,
+            'saved_at': None,
+            'last_server': None
+        }
+        
+        try:
+            if CONFIG_FILE.exists():
+                with open(CONFIG_FILE, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            Logger.error(f"Erreur chargement config utilisateur: {e}")
+        
+        return default_config
+    
+    @staticmethod
+    def save_user_config(android_id: str, server_url: str):
+        """Sauvegarde la configuration utilisateur"""
+        try:
+            config = {
+                'android_id': android_id,
+                'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'last_server': server_url,
+                'version': '3.0'
+            }
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+            Logger.success("Configuration utilisateur sauvegardée")
+        except Exception as e:
+            Logger.error(f"Erreur sauvegarde config: {e}")
+    
+    @staticmethod
+    def clear_user_config():
+        """Efface la configuration utilisateur"""
+        try:
+            if CONFIG_FILE.exists():
+                CONFIG_FILE.unlink()
+                Logger.log("Configuration effacée")
+        except Exception as e:
+            Logger.error(f"Erreur effacement config: {e}")
+
+# ==================== GESTIONNAIRE DE SERVEUR ====================
+class ServerManager:
+    """Gère la recherche et la surveillance des serveurs"""
+    
+    def __init__(self):
+        self.current_url = None
+        self.backup_urls = []
+        self.admin_contact = "@Juana-archer"
+    
+    def update_from_config(self, config: Dict[str, Any]):
+        """Met à jour les URLs depuis la config"""
+        self.current_url = config.get('current_url')
+        self.backup_urls = config.get('backup_urls', [])
+        self.admin_contact = config.get('admin_contact', '@Juana-archer')
+    
+    def get_all_urls(self) -> List[str]:
+        """Retourne toutes les URLs disponibles"""
+        urls = []
+        if self.current_url:
+            urls.append(self.current_url)
+        urls.extend(self.backup_urls)
+        return urls
+    
+    def find_active_server(self) -> Optional[str]:
+        """Trouve un serveur actif"""
+        Logger.log("\n🔍 RECHERCHE DU SERVEUR ACTIF")
+        
+        # Récupère la configuration
+        config = ConfigManager.get_server_config()
+        self.update_from_config(config)
+        
+        urls = self.get_all_urls()
+        
+        if not urls:
+            Logger.error("Aucune URL configurée")
+            return None
+        
+        Logger.log(f"📌 {len(urls)} URLs à tester")
+        
+        # Teste chaque endpoint de santé pour chaque URL
+        for endpoint in HEALTH_CHECK_ENDPOINTS:
+            Logger.log(f"Test endpoint: {endpoint}")
+            
+            for url in urls:
+                full_url = url.rstrip('/') + endpoint
+                response = NetworkManager.safe_request('GET', full_url)
+                
+                if response and response.status_code == 200:
+                    Logger.success(f"Serveur actif: {url}")
+                    return url
+                
+                # Petit délai entre les tests
+                time.sleep(0.5)
+        
+        Logger.error("Aucun serveur trouvé")
+        return None
+    
+    def verify_license(self, server_url: str, android_id: str) -> Tuple[bool, Optional[str], Optional[str]]:
+        """Vérifie la licence auprès du serveur"""
+        Logger.log("🔍 Vérification de la licence...")
+        
+        try:
+            response = NetworkManager.safe_request(
+                'POST',
+                f"{server_url}/verify",
                 json={"android_id": android_id},
                 timeout=10
             )
             
-            if response.status_code == 200:
+            if response and response.status_code == 200:
                 data = response.json()
-                if data.get('valid'):
-                    return True, data.get('message'), data.get('time_left')
-                else:
-                    return False, data.get('message', 'Compte invalide'), None
-            else:
-                return False, f"Erreur serveur ({response.status_code})", None
+                valid = data.get('valid', False)
+                message = data.get('message', '')
+                time_left = data.get('time_left')
                 
-        except:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(2)
-                continue
-    
-    return False, "❌ Connexion impossible", None
-
-def monitor_server(server_url, android_id):
-    print(f"⏰ Surveillance activée")
-    
-    while True:
-        time.sleep(CHECK_INTERVAL)
-        
-        # Vérifie si le serveur est toujours là
-        try:
-            requests.get(f"{server_url}/", timeout=3)
-        except:
-            print("\n⚠️ Connexion perdue, recherche d'un nouveau serveur...")
-            new_url = find_active_server()
-            if new_url:
-                print(f"✅ Nouveau serveur: {new_url}")
-                config = load_config()
-                if config and 'android_id' in config:
-                    save_config(config['android_id'], new_url)
-                server_url = new_url
+                if valid:
+                    Logger.success("Licence valide")
+                    if time_left:
+                        Logger.log(f"⏳ Temps restant: {time_left}")
+                else:
+                    Logger.error(f"Licence invalide: {message}")
+                
+                return valid, message, time_left
             else:
-                print("❌ Aucun serveur trouvé")
-                print("📱 Contacte l'admin: @Juana-archer")
-                os._exit(1)
+                status = response.status_code if response else "pas de réponse"
+                Logger.error(f"Erreur serveur: {status}")
+                return False, f"Erreur serveur ({status})", None
+                
+        except Exception as e:
+            Logger.error(f"Erreur vérification: {e}")
+            return False, str(e), None
+
+# ==================== SURVEILLANCE ====================
+class Monitor:
+    """Surveillance en arrière-plan"""
+    
+    def __init__(self, server_manager: ServerManager, android_id: str):
+        self.server_manager = server_manager
+        self.android_id = android_id
+        self.running = True
+    
+    def start(self):
+        """Démarre la surveillance"""
+        thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        thread.start()
+        # Modification ici : message adapté à 20 minutes
+        Logger.log(f"⏰ Surveillance activée (vérification toutes les 20 minutes)")
+    
+    def _monitor_loop(self):
+        """Boucle de surveillance"""
+        while self.running:
+            time.sleep(CHECK_INTERVAL)
+            
+            try:
+                self._check_server_health()
+                self._check_license_expiry()
+            except Exception as e:
+                Logger.error(f"Erreur dans la boucle de surveillance: {e}")
+    
+    def _check_server_health(self):
+        """Vérifie la santé du serveur"""
+        if not self.server_manager.current_url:
+            return
         
-        # Vérifie l'expiration
+        Logger.log("🩺 Vérification santé serveur...")
+        
+        # Teste l'URL actuelle
+        for endpoint in HEALTH_CHECK_ENDPOINTS:
+            url = self.server_manager.current_url.rstrip('/') + endpoint
+            response = NetworkManager.safe_request('GET', url, timeout=5)
+            
+            if response and response.status_code == 200:
+                Logger.log("✅ Serveur OK")
+                return
+        
+        # Serveur actuel HS, cherche un nouveau
+        Logger.warning("⚠️ Serveur actuel inaccessible")
+        new_url = self.server_manager.find_active_server()
+        
+        if new_url:
+            Logger.success(f"Nouveau serveur: {new_url}")
+            self.server_manager.current_url = new_url
+            
+            # Met à jour la config
+            config = ConfigManager.load_user_config()
+            if config.get('android_id'):
+                ConfigManager.save_user_config(config['android_id'], new_url)
+        else:
+            Logger.error("❌ Aucun serveur de secours disponible")
+    
+    def _check_license_expiry(self):
+        """Vérifie si la licence a expiré"""
+        if not self.server_manager.current_url:
+            return
+        
+        valid, message, _ = self.server_manager.verify_license(
+            self.server_manager.current_url, 
+            self.android_id
+        )
+        
+        if not valid:
+            Logger.error("\n" + "!"*70)
+            Logger.error("❌ SESSION EXPIRÉE!")
+            Logger.error(message)
+            Logger.error("!"*70)
+            
+            # Nettoie la config si nécessaire
+            if "expiré" in message.lower():
+                ConfigManager.clear_user_config()
+            
+            os._exit(1)
+
+# ==================== EXÉCUTEUR DE TASK ====================
+class TaskExecutor:
+    """Exécute le fichier task.py de façon sécurisée"""
+    
+    def __init__(self, android_id: str):
+        self.android_id = android_id
+        self.task_path = Path(__file__).parent / "task.py"
+    
+    def execute(self) -> bool:
+        """Exécute le task.py et retourne le succès"""
+        
+        # Vérifie que task.py existe
+        if not self.task_path.exists():
+            Logger.error(f"❌ Fichier task.py non trouvé!")
+            return False
+        
+        # Charge le fichier
         try:
-            valid, message, time_left = verify_with_admin(server_url, android_id)
-            if not valid:
-                print("\n" + "!"*70)
-                print("❌ SESSION EXPIRÉE")
-                print(message)
-                print("!"*70)
-                os._exit(1)
-        except:
-            pass
+            with open(self.task_path, 'rb') as f:
+                code = f.read().decode('utf-8', errors='ignore')
+            Logger.success("Fichier task.py chargé")
+        except Exception as e:
+            Logger.error(f"Erreur chargement: {e}")
+            return False
+        
+        # Patche le code
+        code = self._patch_code(code)
+        
+        # Prépare l'environnement
+        env = self._prepare_environment()
+        
+        # Exécute
+        try:
+            exec(code, env)
+        except Exception as e:
+            Logger.warning(f"Warning pendant l'exécution: {e}")
+        
+        # Cherche et exécute la fonction principale
+        return self._run_main_function(env)
+    
+    def _patch_code(self, code: str) -> str:
+        """Patche le code pour éviter les problèmes"""
+        lines = code.split('\n')
+        
+        for i, line in enumerate(lines):
+            if 'exec(m.loads(z.decompress(d)))' in line:
+                lines[i] = '''
+try:
+    import marshal as m
+    import zlib as z
+    __decompressed = z.decompress(d)
+    __loaded = m.loads(__decompressed)
+    if __loaded:
+        exec(__loaded)
+except Exception:
+    pass  # Ignoré silencieusement
+'''
+                break
+        
+        return '\n'.join(lines)
+    
+    def _prepare_environment(self) -> Dict[str, Any]:
+        """Prépare l'environnement d'exécution"""
+        # Bypass des fonctions de sortie
+        original_exit = sys.exit
+        sys.exit = lambda *a, **k: None
+        builtins.exit = lambda *a, **k: None
+        builtins.quit = lambda *a, **k: None
+        
+        return {
+            '__name__': '__main__',
+            '__file__': str(self.task_path),
+            'print': print,
+            'ANDROID_ID': self.android_id,
+            '_original_exit': original_exit  # Sauvegarde pour restauration
+        }
+    
+    def _run_main_function(self, env: Dict[str, Any]) -> bool:
+        """Cherche et exécute la fonction principale"""
+        async_funcs = ['main', 'run', 'start', 'execute', 'bot', 'client']
+        
+        async def run_async():
+            for func_name in async_funcs:
+                if func_name in env and callable(env[func_name]):
+                    Logger.log(f"▶ Lancement de {func_name}()...")
+                    try:
+                        if asyncio.iscoroutinefunction(env[func_name]):
+                            await env[func_name]()
+                        else:
+                            env[func_name]()
+                        return True
+                    except Exception as e:
+                        Logger.warning(f"Erreur dans {func_name}: {e}")
+            return False
+        
+        try:
+            # Restaure sys.exit
+            if '_original_exit' in env:
+                sys.exit = env['_original_exit']
+            
+            return asyncio.run(run_async())
+        except KeyboardInterrupt:
+            Logger.log("\n\n👋 Arrêt demandé")
+            return True
+        except Exception as e:
+            Logger.error(f"Erreur: {e}")
+            return False
 
-def patch_task_code(code):
-    lines = code.split('\n')
-    for i, line in enumerate(lines):
-        if 'exec(m.loads(z.decompress(d)))' in line:
-            lines[i] = 'try:\n    import marshal as m\n    import zlib as z\n    exec(m.loads(z.decompress(d)))\nexcept:\n    pass'
-            break
-    return '\n'.join(lines)
+# ==================== INTERFACE UTILISATEUR ====================
+class UserInterface:
+    """Gère les interactions avec l'utilisateur"""
+    
+    @staticmethod
+    def show_welcome():
+        """Affiche le message de bienvenue"""
+        now = datetime.datetime.now()
+        
+        welcome = f"""
+{Colors.BOLD}{Colors.CYAN}╔══════════════════════════════════════════════════════════╗{Colors.END}
+{Colors.BOLD}{Colors.CYAN}║{Colors.END}     🚀 SMM BOT - @Juana-archer                         {Colors.BOLD}{Colors.CYAN}║{Colors.END}
+{Colors.BOLD}{Colors.CYAN}║{Colors.END}     📱 Version 3.0 - Ultra Robuste                     {Colors.BOLD}{Colors.CYAN}║{Colors.END}
+{Colors.BOLD}{Colors.CYAN}╠══════════════════════════════════════════════════════════╣{Colors.END}
+{Colors.BOLD}{Colors.CYAN}║{Colors.END}     {Colors.MAGENTA}📅 {now.strftime('%d/%m/%Y')} à {now.strftime('%H:%M:%S')}{Colors.END}                             {Colors.BOLD}{Colors.CYAN}║{Colors.END}
+{Colors.BOLD}{Colors.CYAN}║{Colors.END}     {Colors.GREEN}🌐 Recherche automatique du serveur{Colors.END}               {Colors.BOLD}{Colors.CYAN}║{Colors.END}
+{Colors.BOLD}{Colors.CYAN}╚══════════════════════════════════════════════════════════╝{Colors.END}
+"""
+        print(welcome)
+    
+    @staticmethod
+    def get_android_id() -> Optional[str]:
+        """Demande l'Android ID à l'utilisateur"""
+        print(f"\n{Colors.BOLD}{Colors.BLUE}╔══════════════════════════════════════════════════════════╗{Colors.END}")
+        print(f"{Colors.BOLD}{Colors.BLUE}║{Colors.END}              📝 PREMIÈRE CONNEXION                       {Colors.BOLD}{Colors.BLUE}║{Colors.END}")
+        print(f"{Colors.BOLD}{Colors.BLUE}╚══════════════════════════════════════════════════════════╝{Colors.END}\n")
+        
+        android_id = input(f"{Colors.YELLOW}📱 Entrez votre Android ID: {Colors.END}").strip()
+        
+        if not android_id:
+            print(f"{Colors.RED}❌ Android ID requis{Colors.END}")
+            return None
+        
+        return android_id
+    
+    @staticmethod
+    def show_activation_success(android_id: str, time_left: Optional[str] = None):
+        """Affiche le succès de l'activation"""
+        msg = f"""
+{Colors.BOLD}{Colors.GREEN}╔══════════════════════════════════════════════════════════╗{Colors.END}
+{Colors.BOLD}{Colors.GREEN}║{Colors.END}              ✅ ACTIVATION RÉUSSIE                        {Colors.BOLD}{Colors.GREEN}║{Colors.END}
+{Colors.BOLD}{Colors.GREEN}╠══════════════════════════════════════════════════════════╣{Colors.END}
+{Colors.BOLD}{Colors.GREEN}║{Colors.END}  📱 Android ID: {android_id[:8]}...{android_id[-4:]}                              {Colors.BOLD}{Colors.GREEN}║{Colors.END}
+"""
+        if time_left:
+            msg += f"{Colors.BOLD}{Colors.GREEN}║{Colors.END}  ⏳ {time_left}                                    {Colors.BOLD}{Colors.GREEN}║{Colors.END}\n"
+        
+        msg += f"""{Colors.BOLD}{Colors.GREEN}║{Colors.END}  👤 Support: @Juana-archer                               {Colors.BOLD}{Colors.GREEN}║{Colors.END}
+{Colors.BOLD}{Colors.GREEN}╚══════════════════════════════════════════════════════════╝{Colors.END}
+"""
+        print(msg)
+    
+    @staticmethod
+    def show_error(message: str, suggest_clear: bool = False):
+        """Affiche une erreur"""
+        print(f"\n{Colors.RED}{'!'*70}{Colors.END}")
+        print(f"{Colors.RED}❌ {message}{Colors.END}")
+        print(f"{Colors.RED}{'!'*70}{Colors.END}\n")
+        
+        if suggest_clear:
+            choix = input("Effacer l'ID sauvegardé ? (o/n): ")
+            if choix.lower() == 'o':
+                ConfigManager.clear_user_config()
+        
+        input(f"{Colors.CYAN}Appuyez sur Entrée pour quitter...{Colors.END}")
 
-# ==================== MAIN ====================
-
+# ==================== PROGRAMME PRINCIPAL ====================
 def main():
-    print("\n🔍 RECHERCHE DU SERVEUR...")
-    print(f"📱 Admin: @Juana-archer")
+    # Affiche l'en-tête
+    UserInterface.show_welcome()
     
-    # Trouve le serveur actif
-    SERVER_URL = find_active_server()
-    
-    if not SERVER_URL:
-        print("\n" + "!"*70)
-        print("❌ AUCUN SERVEUR TROUVÉ")
-        print("\nCauses possibles:")
-        print("• Le serveur de l'admin est éteint")
-        print("• Ta connexion Internet ne fonctionne pas")
-        print("• Contacte l'admin: @Juana-archer")
-        print("!"*70)
-        input("\nAppuyez sur Entrée pour quitter...")
+    # Vérifie la connexion Internet
+    if not NetworkManager.check_internet():
+        UserInterface.show_error("Pas de connexion Internet détectée!")
         sys.exit(1)
     
-    print(f"\n🌐 Connecté à: {SERVER_URL}")
+    # Initialise le gestionnaire de serveur
+    server_manager = ServerManager()
     
-    # Charge ou demande l'ID
-    config = load_config()
-    android_id = config.get('android_id') if config else None
+    # Trouve un serveur actif
+    server_url = server_manager.find_active_server()
+    
+    if not server_url:
+        UserInterface.show_error(
+            "AUCUN SERVEUR DISPONIBLE\n\n"
+            "Causes possibles:\n"
+            "• Le serveur de l'admin est éteint\n"
+            "• Le Gist de configuration est inaccessible\n"
+            "• Contacte l'admin @Juana-archer"
+        )
+        sys.exit(1)
+    
+    Logger.success(f"Connecté à: {server_url}")
+    
+    # Charge ou demande l'Android ID
+    user_config = ConfigManager.load_user_config()
+    android_id = user_config.get('android_id')
     
     if not android_id:
-        print("\n📝 PREMIÈRE UTILISATION")
-        print("-" * 40)
-        android_id = input("📱 Entrez votre Android ID: ").strip()
+        android_id = UserInterface.get_android_id()
         if not android_id:
-            print("❌ ID requis")
             sys.exit(1)
-        save_config(android_id, SERVER_URL)
-        print("-" * 40)
+        ConfigManager.save_user_config(android_id, server_url)
     else:
-        print(f"\n📱 ID sauvegardé: {android_id}")
+        Logger.log(f"📱 ID sauvegardé: {android_id}")
     
-    # Vérification
-    print("\n🔍 VÉRIFICATION DE L'ACTIVATION...")
-    valid, message, time_left = verify_with_admin(SERVER_URL, android_id)
+    # Vérifie la licence
+    valid, message, time_left = server_manager.verify_license(server_url, android_id)
     
     if not valid:
-        print("\n" + "!"*70)
-        print(message)
-        print("\nContacte l'admin: @Juana-archer")
-        print("!"*70)
-        input("\nAppuyez sur Entrée pour quitter...")
+        UserInterface.show_error(
+            f"{message}\n\nContacte l'admin @Juana-archer",
+            suggest_clear=True
+        )
         sys.exit(1)
     
-    print(f"\n✅ ACTIVATION VALIDE")
-    if time_left:
-        print(f"⏳ Temps restant: {time_left}")
-    print("🎯 Lancement du bot...\n")
+    # Affiche le succès
+    UserInterface.show_activation_success(android_id, time_left)
+    print(f"{Colors.GREEN}🎯 Lancement du bot...{Colors.END}\n")
     
-    # Lance la surveillance
-    monitor_thread = threading.Thread(target=monitor_server, args=(SERVER_URL, android_id), daemon=True)
-    monitor_thread.start()
+    # Démarre la surveillance
+    monitor = Monitor(server_manager, android_id)
+    monitor.start()
     
-    # Charge et lance task.py
-    task_path = Path(__file__).parent / "task.py"
+    # Exécute le task.py
+    executor = TaskExecutor(android_id)
+    success = executor.execute()
     
-    if not task_path.exists():
-        print(f"❌ Erreur: fichier task.py non trouvé")
-        print("Assure-toi que task.py est dans le même dossier")
-        input("Appuyez sur Entrée pour quitter...")
-        sys.exit(1)
+    if not success:
+        Logger.warning("Aucune fonction principale trouvée dans task.py")
     
-    try:
-        with open(task_path, 'rb') as f:
-            code = f.read().decode('utf-8', errors='ignore')
-        print("✅ Fichier task.py chargé")
-    except Exception as e:
-        print(f"❌ Erreur: {e}")
-        sys.exit(1)
-    
-    # BYPASS pour éviter les arrêts intempestifs
-    original_exit = sys.exit
-    sys.exit = lambda *a, **k: None
-    builtins.exit = lambda *a, **k: None
-    builtins.quit = lambda *a, **k: None
-    
-    # Prépare l'environnement
-    env = {
-        '__name__': '__main__',
-        '__file__': str(task_path),
-        'print': print,
-        'ANDROID_ID': android_id,
-    }
-    
-    # Exécute le code
-    try:
-        exec(patch_task_code(code), env)
-    except Exception as e:
-        print(f"⚠️ Warning: {e}")
-    
-    # Cherche une fonction à exécuter
-    async_funcs = ['main', 'run', 'start', 'execute', 'bot', 'client']
-    
-    async def run_async_funcs():
-        for func_name in async_funcs:
-            if func_name in env and callable(env[func_name]):
-                print(f"▶ Lancement de {func_name}()...")
-                try:
-                    if asyncio.iscoroutinefunction(env[func_name]):
-                        await env[func_name]()
-                    else:
-                        env[func_name]()
-                    return True
-                except Exception as e:
-                    print(f"⚠ Erreur: {e}")
-        return False
-    
-    # Lance le programme
-    try:
-        sys.exit = original_exit
-        if asyncio.run(run_async_funcs()):
-            print("\n✅ Bot exécuté avec succès")
-        else:
-            print("\nℹ Aucune fonction principale trouvée")
-    except KeyboardInterrupt:
-        print("\n\n⏹️ Arrêt demandé")
-    except Exception as e:
-        print(f"\n❌ Erreur: {e}")
-    
-    print("\n" + "="*70)
-    input("Appuyez sur Entrée pour fermer...")
+    Logger.log("\n" + "="*70)
+    Logger.log("Bot terminé - Pour relancer: python3 run_bot.py")
+    Logger.log("="*70)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n\n{Colors.YELLOW}👋 Arrêt du bot - À bientôt !{Colors.END}")
+    except Exception as e:
+        Logger.error(f"Erreur fatale: {e}")
+        import traceback
+        traceback.print_exc()
+        input("\nAppuyez sur Entrée pour quitter...")
