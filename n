@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# run_bot.py - Script pour l'UTILISATEUR avec sauvegarde d'ID
+# run_bot.py - Version intelligente avec auto-update
+# Pour les utilisateurs de @Juana-archer
+
 import sys
 import asyncio
 import builtins
@@ -9,29 +11,94 @@ import json
 import requests
 import threading
 import time
-import socket
 from pathlib import Path
 
 print("="*70)
-print("🤖 LANCEUR DU BOT")
+print("🤖 LANCEUR INTELLIGENT DU BOT")
 print("="*70)
 
-# ==================== CONFIGURATION ====================
+# ==================== CONFIGURATION AUTOMATIQUE ====================
+# Gist de l'admin @Juana-archer - Mis à jour automatiquement
+GIST_URL = "https://gist.githubusercontent.com/Juana-archer/f2a6edaedf5fef169fb4a1f15833da3c/raw/067d32893a727c0f59c80794e5b9dd000071aa98/gist_config.json"
 
-# URL de ton serveur via Cloudflare (obtenue avec cloudflared)
-ADMIN_API_URL = "https://posing-raleigh-dinner-cooper.trycloudflare.com"
-
-# Fichier de sauvegarde de l'ID
 CONFIG_FILE = Path(__file__).parent / "bot_config.json"
-
-# Intervalle de vérification d'expiration (en secondes)
+CACHE_FILE = Path(__file__).parent / "server_cache.json"
 CHECK_INTERVAL = 60
 MAX_RETRIES = 3
 
-# ==================== GESTION DE LA CONFIGURATION ====================
+# ==================== FONCTIONS DE MISE À JOUR AUTOMATIQUE ====================
+
+def get_server_config():
+    """Récupère la configuration du serveur depuis le Gist de l'admin"""
+    try:
+        print("🌐 Récupération de la configuration serveur...")
+        response = requests.get(GIST_URL, timeout=5)
+        if response.status_code == 200:
+            config = response.json()
+            # Sauvegarde en cache
+            with open(CACHE_FILE, 'w') as f:
+                json.dump(config, f)
+            print(f"✅ Configuration reçue")
+            print(f"📅 Dernière mise à jour: {config.get('last_update', 'inconnue')}")
+            print(f"📱 Admin: {config.get('admin_contact', '@Juana-archer')}")
+            return config
+        else:
+            print("⚠️ Impossible de joindre le serveur de config")
+            return None
+    except Exception as e:
+        print(f"⚠️ Erreur de connexion: {e}")
+        return None
+
+def load_cached_config():
+    """Charge la configuration depuis le cache local"""
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {"current_url": None, "backup_urls": []}
+
+def find_active_server():
+    """Trouve un serveur actif en testant toutes les URLs"""
+    print("\n🔍 RECHERCHE DU SERVEUR ACTIF")
+    print("-" * 40)
+    
+    # Essaie d'abord de récupérer la config en ligne
+    config = get_server_config()
+    
+    if not config:
+        print("📦 Utilisation du cache local")
+        config = load_cached_config()
+    
+    # Construit la liste des URLs à tester
+    urls_to_test = []
+    if config.get('current_url'):
+        urls_to_test.append(config['current_url'])
+        print(f"📌 URL principale: {config['current_url']}")
+    
+    backup_urls = config.get('backup_urls', [])
+    if backup_urls:
+        print(f"📌 URLs de secours: {len(backup_urls)}")
+        urls_to_test.extend(backup_urls)
+    
+    print("-" * 40)
+    
+    # Teste chaque URL
+    for i, url in enumerate(urls_to_test, 1):
+        print(f"🔍 Test {i}/{len(urls_to_test)}: {url[:50]}...")
+        try:
+            response = requests.get(f"{url}/", timeout=3)
+            if response.status_code == 200:
+                print(f"✅ SERVEUR TROUVÉ !")
+                print(f"   → {url}")
+                return url
+        except:
+            continue
+    
+    return None
+
+# ==================== FONCTIONS EXISTANTES ====================
 
 def load_config():
-    """Charge la configuration sauvegardée"""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, 'r') as f:
@@ -40,31 +107,26 @@ def load_config():
             return {}
     return {}
 
-def save_config(android_id):
-    """Sauvegarde l'Android ID"""
+def save_config(android_id, server_url):
     config = {
         'android_id': android_id,
         'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'server_url': ADMIN_API_URL
+        'server_url': server_url
     }
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
-    print(f"✅ Android ID sauvegardé")
+    print(f"✅ Configuration sauvegardée")
 
 def clear_config():
-    """Supprime la configuration"""
     if CONFIG_FILE.exists():
         CONFIG_FILE.unlink()
         print("🗑️ Configuration effacée")
 
-# ==================== FONCTIONS DE VÉRIFICATION ====================
-
-def verify_with_admin(android_id):
-    """Vérifie l'activation auprès du serveur admin"""
+def verify_with_admin(server_url, android_id):
     for attempt in range(MAX_RETRIES):
         try:
             response = requests.post(
-                f"{ADMIN_API_URL}/verify", 
+                f"{server_url}/verify", 
                 json={"android_id": android_id},
                 timeout=10
             )
@@ -78,144 +140,121 @@ def verify_with_admin(android_id):
             else:
                 return False, f"Erreur serveur ({response.status_code})", None
                 
-        except requests.exceptions.ConnectionError:
+        except:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(2)
                 continue
-            return False, "❌ Impossible de contacter le serveur. Vérifie ta connexion Internet.", None
-            
-        except requests.exceptions.Timeout:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(2)
-                continue
-            return False, "❌ Délai d'attente dépassé. Le serveur ne répond pas.", None
-            
-        except Exception as e:
-            return False, f"❌ Erreur: {str(e)}", None
     
-    return False, "❌ Échec de connexion après plusieurs tentatives", None
+    return False, "❌ Connexion impossible", None
 
-def expiration_monitor(android_id):
-    """Surveille l'expiration en arrière-plan"""
-    print(f"⏰ Surveillance d'expiration activée (vérification toutes les {CHECK_INTERVAL}s)")
+def monitor_server(server_url, android_id):
+    print(f"⏰ Surveillance activée")
     
     while True:
         time.sleep(CHECK_INTERVAL)
         
+        # Vérifie si le serveur est toujours là
         try:
-            valid, message, time_left = verify_with_admin(android_id)
-            
+            requests.get(f"{server_url}/", timeout=3)
+        except:
+            print("\n⚠️ Connexion perdue, recherche d'un nouveau serveur...")
+            new_url = find_active_server()
+            if new_url:
+                print(f"✅ Nouveau serveur: {new_url}")
+                config = load_config()
+                if config and 'android_id' in config:
+                    save_config(config['android_id'], new_url)
+                server_url = new_url
+            else:
+                print("❌ Aucun serveur trouvé")
+                print("📱 Contacte l'admin: @Juana-archer")
+                os._exit(1)
+        
+        # Vérifie l'expiration
+        try:
+            valid, message, time_left = verify_with_admin(server_url, android_id)
             if not valid:
                 print("\n" + "!"*70)
-                print("❌ SESSION EXPIRÉE OU SERVEUR INDISPONIBLE !")
+                print("❌ SESSION EXPIRÉE")
                 print(message)
-                print("Le bot va s'arrêter.")
-                print("!"*70 + "\n")
-                
-                # Supprime la configuration si le compte a expiré
-                if "expiré" in message.lower():
-                    clear_config()
-                
-                # Arrêt forcé
+                print("!"*70)
                 os._exit(1)
-                
-            elif time_left and ("min" in time_left or "0j" in time_left):
-                print(f"⏳ Temps restant: {time_left}")
-                    
         except:
             pass
 
 def patch_task_code(code):
-    """Patche le code task.py pour éviter les problèmes"""
     lines = code.split('\n')
-    
     for i, line in enumerate(lines):
         if 'exec(m.loads(z.decompress(d)))' in line:
-            lines[i] = '''
-try:
-    import marshal as m
-    import zlib as z
-    __decompressed = z.decompress(d)
-    __loaded = m.loads(__decompressed)
-    if __loaded:
-        exec(__loaded)
-except:
-    pass  # Ignoré silencieusement
-'''
+            lines[i] = 'try:\n    import marshal as m\n    import zlib as z\n    exec(m.loads(z.decompress(d)))\nexcept:\n    pass'
             break
-    
     return '\n'.join(lines)
 
-# ==================== PROGRAMME PRINCIPAL ====================
+# ==================== MAIN ====================
 
 def main():
-    print(f"🌐 Serveur configuré: {ADMIN_API_URL}")
+    print("\n🔍 RECHERCHE DU SERVEUR...")
+    print(f"📱 Admin: @Juana-archer")
     
-    # Charge la configuration existante
+    # Trouve le serveur actif
+    SERVER_URL = find_active_server()
+    
+    if not SERVER_URL:
+        print("\n" + "!"*70)
+        print("❌ AUCUN SERVEUR TROUVÉ")
+        print("\nCauses possibles:")
+        print("• Le serveur de l'admin est éteint")
+        print("• Ta connexion Internet ne fonctionne pas")
+        print("• Contacte l'admin: @Juana-archer")
+        print("!"*70)
+        input("\nAppuyez sur Entrée pour quitter...")
+        sys.exit(1)
+    
+    print(f"\n🌐 Connecté à: {SERVER_URL}")
+    
+    # Charge ou demande l'ID
     config = load_config()
     android_id = config.get('android_id') if config else None
     
-    # Si pas d'ID sauvegardé, on demande
     if not android_id:
         print("\n📝 PREMIÈRE UTILISATION")
         print("-" * 40)
         android_id = input("📱 Entrez votre Android ID: ").strip()
-        
         if not android_id:
-            print("❌ Android ID requis")
-            input("Appuyez sur Entrée pour quitter...")
+            print("❌ ID requis")
             sys.exit(1)
-        
-        # Sauvegarde l'ID
-        save_config(android_id)
+        save_config(android_id, SERVER_URL)
         print("-" * 40)
     else:
-        print(f"\n📱 Android ID sauvegardé: {android_id}")
-        print(f"📅 Sauvegardé le: {config.get('saved_at')}")
-        print("-" * 40)
+        print(f"\n📱 ID sauvegardé: {android_id}")
     
-    # Vérification initiale
+    # Vérification
     print("\n🔍 VÉRIFICATION DE L'ACTIVATION...")
-    valid, message, time_left = verify_with_admin(android_id)
+    valid, message, time_left = verify_with_admin(SERVER_URL, android_id)
     
     if not valid:
         print("\n" + "!"*70)
         print(message)
-        print("\nProblèmes possibles:")
-        print("1️⃣ L'ID est incorrect ou a expiré")
-        print("2️⃣ Le serveur n'est pas accessible")
-        print("3️⃣ Ta connexion Internet ne fonctionne pas")
-        print("!"*70 + "\n")
-        
-        choix = input("Voulez-vous effacer l'ID sauvegardé ? (o/n): ")
-        if choix.lower() == 'o':
-            clear_config()
-            print("Configuration effacée. Relance le programme.")
-        
-        input("Appuyez sur Entrée pour quitter...")
+        print("\nContacte l'admin: @Juana-archer")
+        print("!"*70)
+        input("\nAppuyez sur Entrée pour quitter...")
         sys.exit(1)
-    else:
-        print(f"\n✅ ACTIVATION VALIDE")
-        if time_left:
-            print(f"⏳ Temps restant: {time_left}")
-        print("🎯 Lancement du bot...\n")
     
-    # Démarre le moniteur d'expiration dans un thread séparé
-    monitor_thread = threading.Thread(target=expiration_monitor, args=(android_id,), daemon=True)
+    print(f"\n✅ ACTIVATION VALIDE")
+    if time_left:
+        print(f"⏳ Temps restant: {time_left}")
+    print("🎯 Lancement du bot...\n")
+    
+    # Lance la surveillance
+    monitor_thread = threading.Thread(target=monitor_server, args=(SERVER_URL, android_id), daemon=True)
     monitor_thread.start()
     
-    # BYPASS pour éviter les arrêts intempestifs du task.py
-    original_exit = sys.exit
-    sys.exit = lambda *a, **k: None
-    builtins.exit = lambda *a, **k: None
-    builtins.quit = lambda *a, **k: None
-    
-    # Charge le fichier task.py
+    # Charge et lance task.py
     task_path = Path(__file__).parent / "task.py"
     
     if not task_path.exists():
-        print(f"❌ Erreur: fichier task.py non trouvé dans {task_path.parent}")
-        print("Assure-toi que task.py est dans le même dossier que run_bot.py")
+        print(f"❌ Erreur: fichier task.py non trouvé")
+        print("Assure-toi que task.py est dans le même dossier")
         input("Appuyez sur Entrée pour quitter...")
         sys.exit(1)
     
@@ -224,12 +263,14 @@ def main():
             code = f.read().decode('utf-8', errors='ignore')
         print("✅ Fichier task.py chargé")
     except Exception as e:
-        print(f"❌ Erreur lors du chargement de task.py: {e}")
-        input("Appuyez sur Entrée pour quitter...")
+        print(f"❌ Erreur: {e}")
         sys.exit(1)
     
-    # Patche le code
-    patched_code = patch_task_code(code)
+    # BYPASS pour éviter les arrêts intempestifs
+    original_exit = sys.exit
+    sys.exit = lambda *a, **k: None
+    builtins.exit = lambda *a, **k: None
+    builtins.quit = lambda *a, **k: None
     
     # Prépare l'environnement
     env = {
@@ -239,11 +280,11 @@ def main():
         'ANDROID_ID': android_id,
     }
     
-    # Exécute le code pour charger les fonctions
+    # Exécute le code
     try:
-        exec(patched_code, env)
+        exec(patch_task_code(code), env)
     except Exception as e:
-        print(f"⚠️ Warning lors du chargement: {e}")
+        print(f"⚠️ Warning: {e}")
     
     # Cherche une fonction à exécuter
     async_funcs = ['main', 'run', 'start', 'execute', 'bot', 'client']
@@ -254,45 +295,28 @@ def main():
                 print(f"▶ Lancement de {func_name}()...")
                 try:
                     if asyncio.iscoroutinefunction(env[func_name]):
-                        # Exécution asynchrone avec vérification périodique
-                        task = asyncio.create_task(env[func_name]())
-                        
-                        # Boucle de vérification
-                        while not task.done():
-                            await asyncio.sleep(1)
-                            
-                        result = task.result()
+                        await env[func_name]()
                     else:
-                        # Exécution synchrone
-                        result = env[func_name]()
-                    
-                    print(f"✅ Programme terminé")
+                        env[func_name]()
                     return True
                 except Exception as e:
-                    print(f"⚠ Erreur dans {func_name}: {e}")
+                    print(f"⚠ Erreur: {e}")
         return False
     
     # Lance le programme
     try:
-        # Restaure la fonction exit pour le programme
         sys.exit = original_exit
-        
-        # Exécute
         if asyncio.run(run_async_funcs()):
             print("\n✅ Bot exécuté avec succès")
         else:
-            print("\nℹ Aucune fonction principale trouvée dans task.py")
-            print("Le fichier a été chargé mais rien n'a été exécuté")
-            print("Fonctions disponibles:", [f for f in env if callable(env[f]) and not f.startswith('_')][:10])
-            
+            print("\nℹ Aucune fonction principale trouvée")
     except KeyboardInterrupt:
-        print("\n\n⏹️ Arrêt demandé par l'utilisateur")
+        print("\n\n⏹️ Arrêt demandé")
     except Exception as e:
-        print(f"\n❌ Erreur pendant l'exécution: {e}")
+        print(f"\n❌ Erreur: {e}")
     
     print("\n" + "="*70)
-    print("Pour relancer le bot, exécute simplement : python3 run_bot.py")
-    print("="*70)
+    input("Appuyez sur Entrée pour fermer...")
 
 if __name__ == "__main__":
     main()
