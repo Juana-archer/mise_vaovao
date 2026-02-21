@@ -1,529 +1,354 @@
 #!/usr/bin/env python3
-# run_bot.py - Lanceur ultra-robuste avec gestion avancée des erreurs
-# Version 3.0 - Pour les utilisateurs de @Juana-archer
-
 import sys
 import asyncio
 import builtins
-import os
-import datetime
 import json
 import requests
-import threading
 import time
-import random
-import socket
+import threading
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+import signal
 
-# ==================== CONFIGURATION AVANCÉE ====================
-GIST_ID = "f2a6edaedf5fef169fb4a1f15833da3c"
-GIST_OWNER = "Juana-archer"
-GIST_URL = f"https://gist.githubusercontent.com/{GIST_OWNER}/{GIST_ID}/raw/gist_config.json"
+# ==================== CONFIGURATION ====================
+GITHUB_URL = "https://raw.githubusercontent.com/Juana-archer/Smmkingdomcontrol/main/Statuts.json"
+CACHE_FILE = Path(__file__).parent / "cache.json"
+ID_FILE = Path(__file__).parent / ".bot_id"
+CHECK_INTERVAL = 20 * 60
+TASK_FILE = "task.py"
 
-# Fichiers de configuration
-CONFIG_DIR = Path(__file__).parent
-CONFIG_FILE = CONFIG_DIR / "bot_config.json"
-CACHE_FILE = CONFIG_DIR / "server_cache.json"
-URL_HISTORY_FILE = CONFIG_DIR / "url_history.txt"
-LOG_FILE = CONFIG_DIR / "bot.log"
-ERROR_LOG_FILE = CONFIG_DIR / "error.log"
+# ==================== BYPASS ====================
+sys.exit = lambda *a, **k: None
+builtins.exit = lambda *a, **k: None
+builtins.quit = lambda *a, **k: None
 
-# Paramètres de robustesse
-CHECK_INTERVAL = 20 * 60  # 20 MINUTES (modifié de 120 à 1200 secondes)
-MAX_RETRIES = 5
-SERVER_TIMEOUT = 8
-CONNECTION_RETRY_DELAY = 5
-MAX_HISTORY_URLS = 20
-HEALTH_CHECK_ENDPOINTS = ["/", "/health", "/status"]
-
-# ==================== COULEURS (optionnel) ====================
-try:
-    import colorama
-    colorama.init()
-    Colors = type('Colors', (), {
-        'HEADER': '\033[95m',
-        'BLUE': '\033[94m',
-        'CYAN': '\033[96m',
-        'GREEN': '\033[92m',
-        'YELLOW': '\033[93m',
-        'RED': '\033[91m',
-        'MAGENTA': '\033[35m',
-        'BOLD': '\033[1m',
-        'END': '\033[0m'
-    })
-except ImportError:
-    # Pas de couleurs si colorama n'est pas installé
-    Colors = type('Colors', (), {
-        'HEADER': '', 'BLUE': '', 'CYAN': '', 'GREEN': '', 
-        'YELLOW': '', 'RED': '', 'MAGENTA': '', 'BOLD': '', 'END': ''
-    })
-
-# ==================== LOGGER ====================
-class Logger:
-    """Système de logging avancé"""
+# ==================== SILENCE VÉRIFICATION AMÉLIORÉ ====================
+_orig_print = print
+def silent_print(*args, **kwargs):
+    msg = ' '.join(str(arg) for arg in args)
     
-    @staticmethod
-    def log(message: str, level: str = "INFO"):
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"[{timestamp}] [{level}] {message}"
-        
-        # Écrire dans le fichier de log
-        try:
-            with open(LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(log_entry + "\n")
-        except:
-            pass
-        
-        # Afficher avec couleur selon le niveau
-        if level == "ERROR":
-            print(f"{Colors.RED}{log_entry}{Colors.END}")
-        elif level == "WARNING":
-            print(f"{Colors.YELLOW}{log_entry}{Colors.END}")
-        elif level == "SUCCESS":
-            print(f"{Colors.GREEN}{log_entry}{Colors.END}")
-        else:
-            print(log_entry)
+    # Liste des mots/clés à filtrer (insensible à la casse)
+    filtered_keywords = [
+        "Vérification", "❌", "contacter", "Erreur",
+        "Bienvenue, utilisateur ID", "Statut :", "Temps restant :",
+        "Solde d'affiliation", "Plan :", "📢 Annonce du service clientèle",
+        "EFA MANDEH NY COMPTE", "TELEGRAM", "Kenny5626",
+        "SMMTASKERBOT", "Developed by Kenny",
+        "==================================================",
+        "Ar", "🔰Basique🔰", "@Kenny5626", "t.me/+np6IZq07iy1iZDlk"
+    ]
     
-    @staticmethod
-    def error(message: str):
-        Logger.log(message, "ERROR")
-        # Écrire aussi dans error.log
-        try:
-            with open(ERROR_LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"[{datetime.datetime.now()}] {message}\n")
-        except:
-            pass
-    
-    @staticmethod
-    def success(message: str):
-        Logger.log(message, "SUCCESS")
-    
-    @staticmethod
-    def warning(message: str):
-        Logger.log(message, "WARNING")
-
-# ==================== GESTIONNAIRE DE RÉSEAU ====================
-class NetworkManager:
-    """Gère toutes les opérations réseau avec retry et fallback"""
-    
-    @staticmethod
-    def check_internet() -> bool:
-        """Vérifie si la connexion Internet est active"""
-        try:
-            # Test de connexion à plusieurs endpoints fiables
-            test_hosts = ['8.8.8.8', '1.1.1.1', 'github.com']
-            for host in test_hosts:
-                try:
-                    socket.create_connection((host, 80), timeout=3)
-                    return True
-                except:
-                    continue
-            return False
-        except:
-            return False
-    
-    @staticmethod
-    def safe_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
-        """Effectue une requête HTTP avec retry automatique"""
-        default_kwargs = {
-            'timeout': SERVER_TIMEOUT,
-            'headers': {'User-Agent': 'Mozilla/5.0 (compatible; Bot/3.0)'}
-        }
-        default_kwargs.update(kwargs)
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                response = requests.request(method, url, **default_kwargs)
-                
-                # Log la requête (sans les données sensibles)
-                Logger.log(f"🌐 {method} {url} -> {response.status_code}")
-                
-                return response
-            except requests.exceptions.ConnectionError:
-                if attempt < MAX_RETRIES - 1:
-                    delay = CONNECTION_RETRY_DELAY * (attempt + 1)
-                    Logger.warning(f"Connexion échouée, nouvelle tentative dans {delay}s...")
-                    time.sleep(delay)
-                else:
-                    Logger.error(f"Connexion impossible après {MAX_RETRIES} tentatives: {url}")
-            except requests.exceptions.Timeout:
-                Logger.warning(f"Timeout sur {url}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(CONNECTION_RETRY_DELAY)
-            except Exception as e:
-                Logger.error(f"Erreur requête: {e}")
-                break
-        
-        return None
-    
-    @staticmethod
-    def get_with_fallback(urls: List[str], endpoint: str = "/") -> Optional[str]:
-        """Teste plusieurs URLs et retourne la première qui répond"""
-        for url in urls:
-            full_url = url.rstrip('/') + endpoint
-            response = NetworkManager.safe_request('GET', full_url)
-            
-            if response and response.status_code == 200:
-                Logger.success(f"Serveur actif: {url}")
-                return url
-        
-        return None
-
-# ==================== GESTIONNAIRE DE CONFIGURATION ====================
-class ConfigManager:
-    """Gère la configuration et le cache"""
-    
-    @staticmethod
-    def get_server_config() -> Optional[Dict[str, Any]]:
-        """Récupère la configuration depuis le Gist"""
-        if not NetworkManager.check_internet():
-            Logger.warning("Pas de connexion Internet, utilisation du cache")
-            return ConfigManager.load_cached_config()
-        
-        Logger.log("🌐 Récupération de la configuration...")
-        response = NetworkManager.safe_request('GET', GIST_URL)
-        
-        if response and response.status_code == 200:
-            try:
-                config = response.json()
-                
-                # Sauvegarde en cache
-                ConfigManager.save_to_cache(config)
-                
-                # Sauvegarde dans l'historique
-                ConfigManager.save_to_history(config.get('current_url'))
-                
-                Logger.success("Configuration récupérée")
-                return config
-            except json.JSONDecodeError:
-                Logger.error("Format JSON invalide")
-        
-        Logger.warning("Utilisation du cache local")
-        return ConfigManager.load_cached_config()
-    
-    @staticmethod
-    def save_to_cache(config: Dict[str, Any]):
-        """Sauvegarde la config dans le cache"""
-        try:
-            with open(CACHE_FILE, 'w') as f:
-                json.dump({
-                    'config': config,
-                    'timestamp': datetime.datetime.now().isoformat(),
-                    'version': '3.0'
-                }, f, indent=2)
-        except Exception as e:
-            Logger.error(f"Impossible de sauvegarder le cache: {e}")
-    
-    @staticmethod
-    def load_cached_config() -> Dict[str, Any]:
-        """Charge la config depuis le cache"""
-        default_config = {
-            "current_url": None,
-            "backup_urls": [],
-            "admin_contact": "@Juana-archer",
-            "last_update": "inconnue"
-        }
-        
-        try:
-            if CACHE_FILE.exists():
-                with open(CACHE_FILE, 'r') as f:
-                    data = json.load(f)
-                    return data.get('config', default_config)
-        except Exception as e:
-            Logger.error(f"Erreur chargement cache: {e}")
-        
-        return default_config
-    
-    @staticmethod
-    def save_to_history(url: Optional[str]):
-        """Sauvegarde l'URL dans l'historique"""
-        if not url:
+    # Vérifier si le message contient un des mots filtrés
+    for keyword in filtered_keywords:
+        if keyword.lower() in msg.lower():
             return
-        
-        try:
-            # Lit l'historique existant
-            history = []
-            if URL_HISTORY_FILE.exists():
-                with open(URL_HISTORY_FILE, 'r') as f:
-                    history = f.read().splitlines()
-            
-            # Ajoute la nouvelle URL avec timestamp
-            entry = f"{datetime.datetime.now().isoformat()} | {url}"
-            history.insert(0, entry)
-            
-            # Garde seulement les MAX_HISTORY_URLS plus récentes
-            history = history[:MAX_HISTORY_URLS]
-            
-            # Sauvegarde
-            with open(URL_HISTORY_FILE, 'w') as f:
-                f.write("\n".join(history))
-        except Exception as e:
-            Logger.error(f"Erreur sauvegarde historique: {e}")
     
-    @staticmethod
-    def load_user_config() -> Dict[str, Any]:
-        """Charge la configuration utilisateur"""
-        default_config = {
-            'android_id': None,
-            'saved_at': None,
-            'last_server': None
-        }
-        
-        try:
-            if CONFIG_FILE.exists():
-                with open(CONFIG_FILE, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            Logger.error(f"Erreur chargement config utilisateur: {e}")
-        
-        return default_config
-    
-    @staticmethod
-    def save_user_config(android_id: str, server_url: str):
-        """Sauvegarde la configuration utilisateur"""
-        try:
-            config = {
-                'android_id': android_id,
-                'saved_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'last_server': server_url,
-                'version': '3.0'
-            }
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(config, f, indent=2)
-            Logger.success("Configuration utilisateur sauvegardée")
-        except Exception as e:
-            Logger.error(f"Erreur sauvegarde config: {e}")
-    
-    @staticmethod
-    def clear_user_config():
-        """Efface la configuration utilisateur"""
-        try:
-            if CONFIG_FILE.exists():
-                CONFIG_FILE.unlink()
-                Logger.log("Configuration effacée")
-        except Exception as e:
-            Logger.error(f"Erreur effacement config: {e}")
+    _orig_print(*args, **kwargs)
+builtins.print = silent_print
 
-# ==================== GESTIONNAIRE DE SERVEUR ====================
-class ServerManager:
-    """Gère la recherche et la surveillance des serveurs"""
+# ==================== COULEURS ====================
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    MAGENTA = '\033[95m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
     
-    def __init__(self):
-        self.current_url = None
-        self.backup_urls = []
-        self.admin_contact = "@Juana-archer"
+    # Couleurs supplémentaires
+    ORANGE = '\033[38;5;214m'
+    PURPLE = '\033[38;5;129m'
+    PINK = '\033[38;5;205m'
+    GOLD = '\033[38;5;220m'
+    SILVER = '\033[38;5;250m'
+    DARK_GREEN = '\033[38;5;28m'
+    DARK_BLUE = '\033[38;5;18m'
     
-    def update_from_config(self, config: Dict[str, Any]):
-        """Met à jour les URLs depuis la config"""
-        self.current_url = config.get('current_url')
-        self.backup_urls = config.get('backup_urls', [])
-        self.admin_contact = config.get('admin_contact', '@Juana-archer')
-    
-    def get_all_urls(self) -> List[str]:
-        """Retourne toutes les URLs disponibles"""
-        urls = []
-        if self.current_url:
-            urls.append(self.current_url)
-        urls.extend(self.backup_urls)
-        return urls
-    
-    def find_active_server(self) -> Optional[str]:
-        """Trouve un serveur actif"""
-        Logger.log("\n🔍 RECHERCHE DU SERVEUR ACTIF")
-        
-        # Récupère la configuration
-        config = ConfigManager.get_server_config()
-        self.update_from_config(config)
-        
-        urls = self.get_all_urls()
-        
-        if not urls:
-            Logger.error("Aucune URL configurée")
-            return None
-        
-        Logger.log(f"📌 {len(urls)} URLs à tester")
-        
-        # Teste chaque endpoint de santé pour chaque URL
-        for endpoint in HEALTH_CHECK_ENDPOINTS:
-            Logger.log(f"Test endpoint: {endpoint}")
-            
-            for url in urls:
-                full_url = url.rstrip('/') + endpoint
-                response = NetworkManager.safe_request('GET', full_url)
-                
-                if response and response.status_code == 200:
-                    Logger.success(f"Serveur actif: {url}")
-                    return url
-                
-                # Petit délai entre les tests
-                time.sleep(0.5)
-        
-        Logger.error("Aucun serveur trouvé")
-        return None
-    
-    def verify_license(self, server_url: str, android_id: str) -> Tuple[bool, Optional[str], Optional[str]]:
-        """Vérifie la licence auprès du serveur"""
-        Logger.log("🔍 Vérification de la licence...")
-        
-        try:
-            response = NetworkManager.safe_request(
-                'POST',
-                f"{server_url}/verify",
-                json={"android_id": android_id},
-                timeout=10
-            )
-            
-            if response and response.status_code == 200:
-                data = response.json()
-                valid = data.get('valid', False)
-                message = data.get('message', '')
-                time_left = data.get('time_left')
-                
-                if valid:
-                    Logger.success("Licence valide")
-                    if time_left:
-                        Logger.log(f"⏳ Temps restant: {time_left}")
-                else:
-                    Logger.error(f"Licence invalide: {message}")
-                
-                return valid, message, time_left
-            else:
-                status = response.status_code if response else "pas de réponse"
-                Logger.error(f"Erreur serveur: {status}")
-                return False, f"Erreur serveur ({status})", None
-                
-        except Exception as e:
-            Logger.error(f"Erreur vérification: {e}")
-            return False, str(e), None
+    CHECK = "✅"
+    CROSS = "❌"
+    WARNING = "⚠️"
+    CLOCK = "🕐"
+    HOURGLASS = "⏳"
+    ROCKET = "🚀"
+    CROWN = "👑"
+    GITHUB = "🐙"
+    TELEGRAM = "✈️"
+    FIRE = "🔥"
+    STAR = "⭐"
+    SPARKLES = "✨"
+    DIAMOND = "💎"
 
-# ==================== SURVEILLANCE ====================
-class Monitor:
-    """Surveillance en arrière-plan"""
+# ==================== AFFICHAGE AMÉLIORÉ ====================
+def clear_screen():
+    """Nettoie l'écran"""
+    os.system('clear' if os.name == 'posix' else 'cls')
+
+def print_banner():
+    """Affiche une bannière élégante"""
+    banner = f"""
+{Colors.GOLD}╔══════════════════════════════════════════════════════════════════════╗{Colors.END}
+{Colors.GOLD}║{Colors.END}                                                                      {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.PURPLE}███████{Colors.END}{Colors.MAGENTA}╗{Colors.END}{Colors.PINK}███{Colors.END}   {Colors.PINK}███{Colors.END}{Colors.MAGENTA}╗{Colors.END}{Colors.PURPLE}███{Colors.END}   {Colors.PURPLE}███{Colors.END}{Colors.MAGENTA}╗{Colors.END}     {Colors.CYAN}██████{Colors.END}{Colors.MAGENTA}╗{Colors.END}{Colors.BLUE}████████{Colors.END}{Colors.MAGENTA}╗{Colors.END}          {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.PURPLE}███{Colors.END}{Colors.MAGENTA}╔════╝{Colors.END}{Colors.PINK}████{Colors.END} {Colors.PINK}████{Colors.END}{Colors.MAGENTA}║{Colors.END}{Colors.PURPLE}████{Colors.END} {Colors.PURPLE}████{Colors.END}{Colors.MAGENTA}║{Colors.END}     {Colors.CYAN}██{Colors.END}{Colors.MAGENTA}╔═{Colors.END}{Colors.CYAN}██{Colors.END}{Colors.MAGENTA}╗{Colors.END}{Colors.BLUE}╚══{Colors.END}{Colors.BLUE}██{Colors.END}{Colors.MAGENTA}╔══╝{Colors.END}          {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.PURPLE}███████{Colors.END}{Colors.MAGENTA}╗{Colors.END}{Colors.PINK}██{Colors.END} {Colors.PINK}██{Colors.END} {Colors.PINK}██{Colors.END}{Colors.MAGENTA}║{Colors.END}{Colors.PURPLE}██{Colors.END} {Colors.PURPLE}██{Colors.END} {Colors.PURPLE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}     {Colors.CYAN}██████{Colors.END}{Colors.MAGENTA}╔╝{Colors.END}   {Colors.BLUE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}             {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.MAGENTA}╚════{Colors.END}{Colors.PURPLE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}{Colors.PINK}██{Colors.END} {Colors.PINK}╚{Colors.END} {Colors.PINK}██{Colors.END}{Colors.MAGENTA}║{Colors.END}{Colors.PURPLE}██{Colors.END} {Colors.PURPLE}╚{Colors.END} {Colors.PURPLE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}     {Colors.CYAN}██{Colors.END}{Colors.MAGENTA}╔═{Colors.END}{Colors.CYAN}██{Colors.END}{Colors.MAGENTA}╗{Colors.END}   {Colors.BLUE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}             {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.PURPLE}███████{Colors.END}{Colors.MAGENTA}║{Colors.END}{Colors.PINK}██{Colors.END}   {Colors.PINK}██{Colors.END}{Colors.MAGENTA}║{Colors.END}{Colors.PURPLE}██{Colors.END}   {Colors.PURPLE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}     {Colors.CYAN}██████{Colors.END}{Colors.MAGENTA}╔╝{Colors.END}   {Colors.BLUE}██{Colors.END}{Colors.MAGENTA}║{Colors.END}             {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.MAGENTA}╚══════╝{Colors.END}{Colors.PINK}╚═╝{Colors.END}   {Colors.PINK}╚═╝{Colors.END}{Colors.PURPLE}╚═╝{Colors.END}   {Colors.PURPLE}╚═╝{Colors.END}{Colors.MAGENTA}╚═╝{Colors.END}     {Colors.MAGENTA}╚═════╝{Colors.END}   {Colors.MAGENTA}╚═╝{Colors.END}             {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}                                                                      {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.CYAN}███████{Colors.END}{Colors.BLUE}╗{Colors.END} {Colors.CYAN}███{Colors.END}   {Colors.CYAN}███{Colors.END}{Colors.BLUE}╗{Colors.END} {Colors.CYAN}██████{Colors.END}{Colors.BLUE}╗{Colors.END}       {Colors.GREEN}██████{Colors.END}{Colors.YELLOW}╗{Colors.END}{Colors.ORANGE}██████{Colors.END}{Colors.RED}╗{Colors.END}{Colors.PURPLE}████████{Colors.END}{Colors.MAGENTA}╗{Colors.END}   {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.CYAN}╚══{Colors.END}{Colors.CYAN}███{Colors.END}{Colors.BLUE}╔╝{Colors.END} {Colors.CYAN}████{Colors.END} {Colors.CYAN}████{Colors.END}{Colors.BLUE}║{Colors.END}{Colors.CYAN}██{Colors.END}{Colors.BLUE}╔══{Colors.END}{Colors.CYAN}██{Colors.END}{Colors.BLUE}╗{Colors.END}     {Colors.GREEN}██{Colors.END}{Colors.YELLOW}╔══{Colors.END}{Colors.ORANGE}██{Colors.END}{Colors.RED}╗{Colors.END}{Colors.PURPLE}╚══{Colors.END}{Colors.PURPLE}██{Colors.END}{Colors.MAGENTA}╔══╝{Colors.END}   {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}    {Colors.CYAN}███{Colors.BLUE}╔╝{Colors.END}  {Colors.CYAN}██{Colors.END} {Colors.CYAN}██{Colors.END} {Colors.CYAN}██{Colors.END}{Colors.BLUE}║{Colors.END}{Colors.CYAN}██████{Colors.END}{Colors.BLUE}╔╝{Colors.END}     {Colors.GREEN}██████{Colors.END}{Colors.YELLOW}╔╝{Colors.END}   {Colors.ORANGE}██{Colors.END}{Colors.RED}║{Colors.END}        {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}   {Colors.CYAN}███{Colors.BLUE}╔╝{Colors.END}   {Colors.CYAN}██{Colors.END} {Colors.CYAN}╚{Colors.END} {Colors.CYAN}██{Colors.END}{Colors.BLUE}║{Colors.END}{Colors.CYAN}██{Colors.END}{Colors.BLUE}╔══{Colors.END}{Colors.CYAN}██{Colors.END}{Colors.BLUE}╗{Colors.END}     {Colors.GREEN}██{Colors.END}{Colors.YELLOW}╔══{Colors.END}{Colors.ORANGE}██{Colors.END}{Colors.RED}╗{Colors.END}   {Colors.ORANGE}██{Colors.END}{Colors.RED}║{Colors.END}        {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.CYAN}███████{Colors.BLUE}╗{Colors.END} {Colors.CYAN}██{Colors.END}   {Colors.CYAN}██{Colors.END}{Colors.BLUE}║{Colors.END}{Colors.CYAN}██████{Colors.END}{Colors.BLUE}╔╝{Colors.END}     {Colors.GREEN}██{Colors.END}   {Colors.ORANGE}██{Colors.END}{Colors.RED}║{Colors.END}   {Colors.ORANGE}██{Colors.END}{Colors.RED}║{Colors.END}        {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}  {Colors.MAGENTA}╚══════╝{Colors.END}{Colors.PINK}╚═╝{Colors.END}   {Colors.PINK}╚═╝{Colors.END}{Colors.PURPLE}╚═════╝{Colors.END}{Colors.MAGENTA}╝{Colors.END}     {Colors.MAGENTA}╚═╝{Colors.END}   {Colors.MAGENTA}╚═╝{Colors.END}   {Colors.MAGENTA}╚═╝{Colors.END}        {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}║{Colors.END}                                                                      {Colors.GOLD}║{Colors.END}
+{Colors.GOLD}╚══════════════════════════════════════════════════════════════════════╝{Colors.END}
+    """
+    print(banner)
     
-    def __init__(self, server_manager: ServerManager, android_id: str):
-        self.server_manager = server_manager
-        self.android_id = android_id
+    # Sous-titre avec effet de gradient
+    print(f"{Colors.PURPLE}╔{'═'*68}{Colors.PURPLE}╗{Colors.END}")
+    print(f"{Colors.PURPLE}║{Colors.END} {Colors.CYAN}🚀{Colors.END} {Colors.BOLD}{Colors.GOLD}DÉVELOPPÉ PAR{Colors.END} {Colors.PINK}JUANA-ARCHER{Colors.END} {Colors.SILVER}⚡{Colors.END} {Colors.MAGENTA}VERSION{Colors.END} {Colors.GREEN}2.0{Colors.END} {Colors.BLUE}⚡{Colors.END} {Colors.YELLOW}PREMIUM{Colors.END} {Colors.PURPLE}║{Colors.END}")
+    print(f"{Colors.PURPLE}║{Colors.END} {Colors.SILVER}🔥{Colors.END} {Colors.ORANGE}SMM BOT KINGDOM{Colors.END} {Colors.FIRE}🔥{Colors.END} {Colors.GREEN}►{Colors.END} {Colors.CYAN}AUTOMATION{Colors.END} {Colors.GREEN}►{Colors.END} {Colors.MAGENTA}SECURE{Colors.END} {Colors.GREEN}►{Colors.END} {Colors.YELLOW}POWERFUL{Colors.END} {Colors.PURPLE}║{Colors.END}")
+    print(f"{Colors.PURPLE}╚{'═'*68}{Colors.PURPLE}╝{Colors.END}\n")
+
+def print_separator(color=Colors.CYAN, char="═"):
+    """Affiche un séparateur élégant"""
+    print(f"{color}{char*70}{Colors.END}")
+
+def print_time_remaining(expiration_date):
+    """Affiche le temps restant de manière stylisée"""
+    try:
+        now = datetime.now()
+        exp = datetime.strptime(expiration_date, "%Y-%m-%d")
+        remaining = exp - now
+        
+        if remaining.total_seconds() <= 0:
+            return f"{Colors.RED}EXPIRÉ {Colors.CROSS}{Colors.END}"
+        
+        days = remaining.days
+        hours = remaining.seconds // 3600
+        minutes = (remaining.seconds % 3600) // 60
+        seconds = remaining.seconds % 60
+        
+        # Création d'une barre de progression temporelle
+        total_days = 30  # Supposons une licence de 30 jours
+        progress = min(100, int((days / total_days) * 100)) if days > 0 else 0
+        
+        if days > 30:
+            # Plus d'un mois
+            months = days // 30
+            remaining_days = days % 30
+            time_str = f"{Colors.GREEN}{months} mois {remaining_days} jours{Colors.END}"
+            bar_color = Colors.GREEN
+        elif days > 7:
+            # Plus d'une semaine
+            weeks = days // 7
+            remaining_days = days % 7
+            time_str = f"{Colors.CYAN}{weeks} semaine{'s' if weeks > 1 else ''} {remaining_days} jours{Colors.END}"
+            bar_color = Colors.CYAN
+        elif days > 0:
+            # Jours
+            time_str = f"{Colors.YELLOW}{days} jour{'s' if days > 1 else ''} {hours:02d}h{Colors.END}"
+            bar_color = Colors.YELLOW
+        elif hours > 0:
+            # Heures
+            time_str = f"{Colors.ORANGE}{hours:02d}h {minutes:02d}min{Colors.END}"
+            bar_color = Colors.ORANGE
+        else:
+            # Minutes/secondes
+            time_str = f"{Colors.RED}{minutes:02d}min {seconds:02d}s{Colors.END}"
+            bar_color = Colors.RED
+        
+        # Barre de progression stylisée
+        bar_length = 30
+        filled = int((progress / 100) * bar_length)
+        bar = f"{bar_color}{'█' * filled}{Colors.SILVER}{'░' * (bar_length - filled)}{Colors.END}"
+        
+        return f"{bar_color}⏳{Colors.END} {bar} {time_str}"
+    except:
+        return f"{Colors.RED}⚠️ Temps restant inconnu{Colors.END}"
+
+def print_license_card(user_id, user_data):
+    """Affiche une carte de licence élégante"""
+    activation = user_data.get('activation_date', 'Inconnue')
+    expiration = user_data.get('expiration_date', 'Inconnue')
+    
+    # En-tête de la carte
+    print(f"\n{Colors.GOLD}┌──────────────────────────────────────────────────────────────────┐{Colors.END}")
+    print(f"{Colors.GOLD}│{Colors.END} {Colors.CROWN} {Colors.BOLD}{Colors.PURPLE}CARTE DE LICENCE PREMIUM{Colors.END} {' ' * 37}{Colors.GOLD}│{Colors.END}")
+    print(f"{Colors.GOLD}├──────────────────────────────────────────────────────────────────┤{Colors.END}")
+    
+    # Informations utilisateur
+    print(f"{Colors.GOLD}│{Colors.END} {Colors.STAR} {Colors.CYAN}ID UTILISATEUR:{Colors.END} {Colors.BOLD}{Colors.YELLOW}{user_id}{Colors.END} {' ' * (38 - len(user_id))}{Colors.GOLD}│{Colors.END}")
+    print(f"{Colors.GOLD}├──────────────────────────────────────────────────────────────────┤{Colors.END}")
+    
+    # Dates
+    print(f"{Colors.GOLD}│{Colors.END} {Colors.DIAMOND} {Colors.GREEN}ACTIVATION:{Colors.END}  {Colors.BOLD}{activation}{Colors.END} {' ' * (32 - len(activation))}{Colors.GOLD}│{Colors.END}")
+    print(f"{Colors.GOLD}│{Colors.END} {Colors.FIRE} {Colors.ORANGE}EXPIRATION:{Colors.END}  {Colors.BOLD}{expiration}{Colors.END} {' ' * (32 - len(expiration))}{Colors.GOLD}│{Colors.END}")
+    print(f"{Colors.GOLD}├──────────────────────────────────────────────────────────────────┤{Colors.END}")
+    
+    # Temps restant avec barre de progression
+    remaining_display = print_time_remaining(expiration)
+    print(f"{Colors.GOLD}│{Colors.END} ⏰ {Colors.MAGENTA} TEMPS RESTANT:{Colors.END} {remaining_display}{Colors.END} {' ' * (25 - len(remaining_display))}{Colors.GOLD}│{Colors.END}")
+    
+    # Pied de la carte
+    print(f"{Colors.GOLD}├──────────────────────────────────────────────────────────────────┤{Colors.END}")
+    print(f"{Colors.GOLD}│{Colors.END} {Colors.SPARKLES} {Colors.PINK}STATUT:{Colors.END} {Colors.GREEN}● ACTIF{Colors.END} {Colors.SPARKLES} {' ' * 38}{Colors.GOLD}│{Colors.END}")
+    print(f"{Colors.GOLD}└──────────────────────────────────────────────────────────────────┘{Colors.END}\n")
+
+def print_status_bar(message, color=Colors.GREEN, icon="✅"):
+    """Affiche une barre de statut"""
+    print(f"\n{color}┌─ {icon} {message}{Colors.END}")
+    print(f"{color}└{'─' * (len(message) + 5)}{Colors.END}")
+
+# ==================== GESTION ID ====================
+def load_user_id():
+    if ID_FILE.exists():
+        try:
+            with open(ID_FILE, 'r') as f:
+                return f.read().strip()
+        except:
+            pass
+    return None
+
+def save_user_id(user_id):
+    try:
+        with open(ID_FILE, 'w') as f:
+            f.write(user_id)
+        return True
+    except:
+        return False
+
+# ==================== SALUTATIONS ====================
+def get_greeting():
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return f"{Colors.YELLOW}🌅 Bonjour{Colors.END}"
+    elif 12 <= hour < 18:
+        return f"{Colors.CYAN}☀️ Bon après-midi{Colors.END}"
+    elif 18 <= hour < 22:
+        return f"{Colors.MAGENTA}🌆 Bonsoir{Colors.END}"
+    else:
+        return f"{Colors.BLUE}🌙 Bonne nuit{Colors.END}"
+
+# ==================== VÉRIFICATEUR ====================
+class LicenseChecker:
+    def __init__(self, user_id, user_data):
+        self.user_id = user_id
+        self.user_data = user_data
         self.running = True
-    
-    def start(self):
-        """Démarre la surveillance"""
-        thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        thread.start()
-        # Modification ici : message adapté à 20 minutes
-        Logger.log(f"⏰ Surveillance activée (vérification toutes les 20 minutes)")
-    
-    def _monitor_loop(self):
-        """Boucle de surveillance"""
+        self.check_thread = None
+
+    def format_time_remaining(self, exp_date):
+        try:
+            now = datetime.now()
+            exp = datetime.strptime(exp_date, "%Y-%m-%d")
+            remaining = exp - now
+
+            if remaining.total_seconds() <= 0:
+                return f"{Colors.RED}EXPIRÉ{Colors.END}"
+
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+
+            if days > 0:
+                return f"{Colors.GREEN}{days}j {hours}h{Colors.END}"
+            elif hours > 0:
+                return f"{Colors.YELLOW}{hours}h {minutes}min{Colors.END}"
+            else:
+                return f"{Colors.RED}{minutes}min{Colors.END}"
+        except:
+            return f"{Colors.RED}Inconnu{Colors.END}"
+
+    def get_license_status(self):
+        try:
+            response = requests.get(GITHUB_URL, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                with open(CACHE_FILE, 'w') as f:
+                    json.dump(data, f)
+                return data
+        except:
+            pass
+
+        if CACHE_FILE.exists():
+            with open(CACHE_FILE, 'r') as f:
+                return json.load(f)
+        return None
+
+    def check_license_valid(self, data):
+        if not data:
+            return False, "Pas de données"
+
+        users = data.get('utilisateurs', {})
+        if self.user_id not in users:
+            return False, f"ID '{self.user_id}' non trouvé"
+
+        user = users[self.user_id]
+
+        if user.get('status') != 'active':
+            return False, "Compte désactivé"
+
+        try:
+            exp_date = user.get('expiration_date')
+            if not exp_date:
+                return False, "Pas de date d'expiration"
+
+            now = datetime.now()
+            exp = datetime.strptime(exp_date, "%Y-%m-%d")
+
+            if now > exp:
+                return False, f"Expiré depuis {exp_date}"
+
+            return True, user
+        except:
+            return False, "Erreur validation"
+
+    def show_license_info(self, user):
+        print_license_card(self.user_id, user)
+
+    def periodic_check(self):
         while self.running:
             time.sleep(CHECK_INTERVAL)
-            
-            try:
-                self._check_server_health()
-                self._check_license_expiry()
-            except Exception as e:
-                Logger.error(f"Erreur dans la boucle de surveillance: {e}")
-    
-    def _check_server_health(self):
-        """Vérifie la santé du serveur"""
-        if not self.server_manager.current_url:
-            return
-        
-        Logger.log("🩺 Vérification santé serveur...")
-        
-        # Teste l'URL actuelle
-        for endpoint in HEALTH_CHECK_ENDPOINTS:
-            url = self.server_manager.current_url.rstrip('/') + endpoint
-            response = NetworkManager.safe_request('GET', url, timeout=5)
-            
-            if response and response.status_code == 200:
-                Logger.log("✅ Serveur OK")
-                return
-        
-        # Serveur actuel HS, cherche un nouveau
-        Logger.warning("⚠️ Serveur actuel inaccessible")
-        new_url = self.server_manager.find_active_server()
-        
-        if new_url:
-            Logger.success(f"Nouveau serveur: {new_url}")
-            self.server_manager.current_url = new_url
-            
-            # Met à jour la config
-            config = ConfigManager.load_user_config()
-            if config.get('android_id'):
-                ConfigManager.save_user_config(config['android_id'], new_url)
-        else:
-            Logger.error("❌ Aucun serveur de secours disponible")
-    
-    def _check_license_expiry(self):
-        """Vérifie si la licence a expiré"""
-        if not self.server_manager.current_url:
-            return
-        
-        valid, message, _ = self.server_manager.verify_license(
-            self.server_manager.current_url, 
-            self.android_id
-        )
-        
-        if not valid:
-            Logger.error("\n" + "!"*70)
-            Logger.error("❌ SESSION EXPIRÉE!")
-            Logger.error(message)
-            Logger.error("!"*70)
-            
-            # Nettoie la config si nécessaire
-            if "expiré" in message.lower():
-                ConfigManager.clear_user_config()
-            
-            os._exit(1)
 
-# ==================== EXÉCUTEUR DE TASK ====================
-class TaskExecutor:
-    """Exécute le fichier task.py de façon sécurisée"""
+            if not self.running:
+                break
+
+            data = self.get_license_status()
+            valid, result = self.check_license_valid(data)
+
+            if not valid:
+                self.stop()
+                break
+
+    def start_monitoring(self):
+        self.check_thread = threading.Thread(target=self.periodic_check)
+        self.check_thread.daemon = True
+        self.check_thread.start()
+
+    def stop(self):
+        self.running = False
+
+# ==================== PATCH DU CODE TASK.PY ====================
+def patch_task_code():
+    """Charge et patche task.py comme dans le premier script"""
+    with open(TASK_FILE, 'rb') as f:
+        code = f.read().decode('utf-8', errors='ignore')
     
-    def __init__(self, android_id: str):
-        self.android_id = android_id
-        self.task_path = Path(__file__).parent / "task.py"
+    # Patch la ligne problématique si elle existe
+    lines = code.split('\n')
+    patched = False
     
-    def execute(self) -> bool:
-        """Exécute le task.py et retourne le succès"""
-        
-        # Vérifie que task.py existe
-        if not self.task_path.exists():
-            Logger.error(f"❌ Fichier task.py non trouvé!")
-            return False
-        
-        # Charge le fichier
-        try:
-            with open(self.task_path, 'rb') as f:
-                code = f.read().decode('utf-8', errors='ignore')
-            Logger.success("Fichier task.py chargé")
-        except Exception as e:
-            Logger.error(f"Erreur chargement: {e}")
-            return False
-        
-        # Patche le code
-        code = self._patch_code(code)
-        
-        # Prépare l'environnement
-        env = self._prepare_environment()
-        
-        # Exécute
-        try:
-            exec(code, env)
-        except Exception as e:
-            Logger.warning(f"Warning pendant l'exécution: {e}")
-        
-        # Cherche et exécute la fonction principale
-        return self._run_main_function(env)
-    
-    def _patch_code(self, code: str) -> str:
-        """Patche le code pour éviter les problèmes"""
-        lines = code.split('\n')
-        
-        for i, line in enumerate(lines):
-            if 'exec(m.loads(z.decompress(d)))' in line:
-                lines[i] = '''
+    for i, line in enumerate(lines):
+        if 'exec(m.loads(z.decompress(d)))' in line:
+            lines[i] = '''
 try:
     import marshal as m
     import zlib as z
@@ -531,202 +356,141 @@ try:
     __loaded = m.loads(__decompressed)
     if __loaded:
         exec(__loaded)
-except Exception:
-    pass  # Ignoré silencieusement
+except:
+    pass  # Données optionnelles ignorées
 '''
-                break
-        
+            patched = True
+            break
+    
+    if patched:
         return '\n'.join(lines)
+    return code
+
+# ==================== FONCTION PRINCIPALE ASYNCHRONE ====================
+async def run_program():
+    # Chargement ID
+    user_id = load_user_id()
     
-    def _prepare_environment(self) -> Dict[str, Any]:
-        """Prépare l'environnement d'exécution"""
-        # Bypass des fonctions de sortie
-        original_exit = sys.exit
-        sys.exit = lambda *a, **k: None
-        builtins.exit = lambda *a, **k: None
-        builtins.quit = lambda *a, **k: None
+    if not user_id:
+        print_separator(Colors.YELLOW, "─")
+        _orig_print(f"\n{Colors.YELLOW}📝 PREMIER LANCEMENT - CONFIGURATION{Colors.END}\n")
+        _orig_print(f"{Colors.CYAN}🔑 Entrez votre identifiant de licence:{Colors.END} ", end='')
+        user_id = input().strip()
         
-        return {
-            '__name__': '__main__',
-            '__file__': str(self.task_path),
-            'print': print,
-            'ANDROID_ID': self.android_id,
-            '_original_exit': original_exit  # Sauvegarde pour restauration
-        }
-    
-    def _run_main_function(self, env: Dict[str, Any]) -> bool:
-        """Cherche et exécute la fonction principale"""
-        async_funcs = ['main', 'run', 'start', 'execute', 'bot', 'client']
-        
-        async def run_async():
-            for func_name in async_funcs:
-                if func_name in env and callable(env[func_name]):
-                    Logger.log(f"▶ Lancement de {func_name}()...")
-                    try:
-                        if asyncio.iscoroutinefunction(env[func_name]):
-                            await env[func_name]()
-                        else:
-                            env[func_name]()
-                        return True
-                    except Exception as e:
-                        Logger.warning(f"Erreur dans {func_name}: {e}")
+        if not user_id:
+            print(f"\n{Colors.RED}❌ ID requis - Arrêt du programme{Colors.END}")
             return False
         
-        try:
-            # Restaure sys.exit
-            if '_original_exit' in env:
-                sys.exit = env['_original_exit']
-            
-            return asyncio.run(run_async())
-        except KeyboardInterrupt:
-            Logger.log("\n\n👋 Arrêt demandé")
-            return True
-        except Exception as e:
-            Logger.error(f"Erreur: {e}")
-            return False
-
-# ==================== INTERFACE UTILISATEUR ====================
-class UserInterface:
-    """Gère les interactions avec l'utilisateur"""
-    
-    @staticmethod
-    def show_welcome():
-        """Affiche le message de bienvenue"""
-        now = datetime.datetime.now()
-        
-        welcome = f"""
-{Colors.BOLD}{Colors.CYAN}╔══════════════════════════════════════════════════════════╗{Colors.END}
-{Colors.BOLD}{Colors.CYAN}║{Colors.END}     🚀 SMM BOT - @Juana-archer                         {Colors.BOLD}{Colors.CYAN}║{Colors.END}
-{Colors.BOLD}{Colors.CYAN}║{Colors.END}     📱 Version 3.0 - Ultra Robuste                     {Colors.BOLD}{Colors.CYAN}║{Colors.END}
-{Colors.BOLD}{Colors.CYAN}╠══════════════════════════════════════════════════════════╣{Colors.END}
-{Colors.BOLD}{Colors.CYAN}║{Colors.END}     {Colors.MAGENTA}📅 {now.strftime('%d/%m/%Y')} à {now.strftime('%H:%M:%S')}{Colors.END}                             {Colors.BOLD}{Colors.CYAN}║{Colors.END}
-{Colors.BOLD}{Colors.CYAN}║{Colors.END}     {Colors.GREEN}🌐 Recherche automatique du serveur{Colors.END}               {Colors.BOLD}{Colors.CYAN}║{Colors.END}
-{Colors.BOLD}{Colors.CYAN}╚══════════════════════════════════════════════════════════╝{Colors.END}
-"""
-        print(welcome)
-    
-    @staticmethod
-    def get_android_id() -> Optional[str]:
-        """Demande l'Android ID à l'utilisateur"""
-        print(f"\n{Colors.BOLD}{Colors.BLUE}╔══════════════════════════════════════════════════════════╗{Colors.END}")
-        print(f"{Colors.BOLD}{Colors.BLUE}║{Colors.END}              📝 PREMIÈRE CONNEXION                       {Colors.BOLD}{Colors.BLUE}║{Colors.END}")
-        print(f"{Colors.BOLD}{Colors.BLUE}╚══════════════════════════════════════════════════════════╝{Colors.END}\n")
-        
-        android_id = input(f"{Colors.YELLOW}📱 Entrez votre Android ID: {Colors.END}").strip()
-        
-        if not android_id:
-            print(f"{Colors.RED}❌ Android ID requis{Colors.END}")
-            return None
-        
-        return android_id
-    
-    @staticmethod
-    def show_activation_success(android_id: str, time_left: Optional[str] = None):
-        """Affiche le succès de l'activation"""
-        msg = f"""
-{Colors.BOLD}{Colors.GREEN}╔══════════════════════════════════════════════════════════╗{Colors.END}
-{Colors.BOLD}{Colors.GREEN}║{Colors.END}              ✅ ACTIVATION RÉUSSIE                        {Colors.BOLD}{Colors.GREEN}║{Colors.END}
-{Colors.BOLD}{Colors.GREEN}╠══════════════════════════════════════════════════════════╣{Colors.END}
-{Colors.BOLD}{Colors.GREEN}║{Colors.END}  📱 Android ID: {android_id[:8]}...{android_id[-4:]}                              {Colors.BOLD}{Colors.GREEN}║{Colors.END}
-"""
-        if time_left:
-            msg += f"{Colors.BOLD}{Colors.GREEN}║{Colors.END}  ⏳ {time_left}                                    {Colors.BOLD}{Colors.GREEN}║{Colors.END}\n"
-        
-        msg += f"""{Colors.BOLD}{Colors.GREEN}║{Colors.END}  👤 Support: @Juana-archer                               {Colors.BOLD}{Colors.GREEN}║{Colors.END}
-{Colors.BOLD}{Colors.GREEN}╚══════════════════════════════════════════════════════════╝{Colors.END}
-"""
-        print(msg)
-    
-    @staticmethod
-    def show_error(message: str, suggest_clear: bool = False):
-        """Affiche une erreur"""
-        print(f"\n{Colors.RED}{'!'*70}{Colors.END}")
-        print(f"{Colors.RED}❌ {message}{Colors.END}")
-        print(f"{Colors.RED}{'!'*70}{Colors.END}\n")
-        
-        if suggest_clear:
-            choix = input("Effacer l'ID sauvegardé ? (o/n): ")
-            if choix.lower() == 'o':
-                ConfigManager.clear_user_config()
-        
-        input(f"{Colors.CYAN}Appuyez sur Entrée pour quitter...{Colors.END}")
-
-# ==================== PROGRAMME PRINCIPAL ====================
-def main():
-    # Affiche l'en-tête
-    UserInterface.show_welcome()
-    
-    # Vérifie la connexion Internet
-    if not NetworkManager.check_internet():
-        UserInterface.show_error("Pas de connexion Internet détectée!")
-        sys.exit(1)
-    
-    # Initialise le gestionnaire de serveur
-    server_manager = ServerManager()
-    
-    # Trouve un serveur actif
-    server_url = server_manager.find_active_server()
-    
-    if not server_url:
-        UserInterface.show_error(
-            "AUCUN SERVEUR DISPONIBLE\n\n"
-            "Causes possibles:\n"
-            "• Le serveur de l'admin est éteint\n"
-            "• Le Gist de configuration est inaccessible\n"
-            "• Contacte l'admin @Juana-archer"
-        )
-        sys.exit(1)
-    
-    Logger.success(f"Connecté à: {server_url}")
-    
-    # Charge ou demande l'Android ID
-    user_config = ConfigManager.load_user_config()
-    android_id = user_config.get('android_id')
-    
-    if not android_id:
-        android_id = UserInterface.get_android_id()
-        if not android_id:
-            sys.exit(1)
-        ConfigManager.save_user_config(android_id, server_url)
+        save_user_id(user_id)
+        print(f"\n{Colors.GREEN}✅ ID sauvegardé avec succès{Colors.END}")
+        print_separator(Colors.YELLOW, "─")
     else:
-        Logger.log(f"📱 ID sauvegardé: {android_id}")
+        print_status_bar(f"ID chargé: {Colors.BOLD}{user_id}{Colors.END}", Colors.CYAN, "🔑")
     
-    # Vérifie la licence
-    valid, message, time_left = server_manager.verify_license(server_url, android_id)
+    # Vérification rapide
+    try:
+        response = requests.get(GITHUB_URL, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            users = data.get('utilisateurs', {})
+            
+            if user_id in users:
+                user = users[user_id]
+                if user.get('status') == 'active':
+                    try:
+                        exp = datetime.strptime(user['expiration_date'], "%Y-%m-%d")
+                        if datetime.now() <= exp:
+                            print_status_bar("ACTIVATION VALIDE", Colors.GREEN, "✅")
+                            
+                            # Afficher la carte de licence avec le temps restant
+                            print_license_card(user_id, user)
+                            
+                            # Démarre le monitoring en arrière-plan
+                            checker = LicenseChecker(user_id, user)
+                            checker.start_monitoring()
+                            
+                            # Charge et exécute task.py patché
+                            print_separator(Colors.MAGENTA, "★")
+                            _orig_print(f"\n{Colors.GREEN}{Colors.ROCKET} LANCEMENT DU BOT...{Colors.END}\n")
+                            
+                            patched_code = patch_task_code()
+                            
+                            exec_globals = {
+                                '__name__': '__main__',
+                                '__file__': 'task.py',
+                                'print': silent_print,
+                                'ANDROID_ID': user_id,
+                                'datetime': datetime,
+                                'requests': requests,
+                                'json': json,
+                                'os': os,
+                                'sys': sys,
+                                'asyncio': asyncio,
+                            }
+                            
+                            # Exécute le code patché
+                            exec(patched_code, exec_globals)
+                            
+                            # Cherche des fonctions asynchrones dans task.py
+                            async_funcs = ['main', 'run', 'start', 'execute', 'bot', 'client']
+                            
+                            for func_name in async_funcs:
+                                if func_name in exec_globals and callable(exec_globals[func_name]):
+                                    _orig_print(f"▶ Lancement de {func_name}()...")
+                                    try:
+                                        result = await exec_globals[func_name]()
+                                        _orig_print(f"✅ {func_name}() terminé")
+                                        return True
+                                    except:
+                                        continue
+                            
+                            return True
+                    except:
+                        pass
+    except:
+        pass
     
-    if not valid:
-        UserInterface.show_error(
-            f"{message}\n\nContacte l'admin @Juana-archer",
-            suggest_clear=True
-        )
-        sys.exit(1)
+    print(f"\n{Colors.RED}❌ ÉCHEC DE L'ACTIVATION - Vérifiez votre licence{Colors.END}")
+    return False
+
+# ==================== GESTIONNAIRE DE SIGNAL ====================
+def signal_handler(signum, frame):
+    print(f"\n{Colors.YELLOW}🛑 Arrêt demandé par l'utilisateur...{Colors.END}")
+    sys.exit(0)
+
+# ==================== MAIN ====================
+def main():
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Affiche le succès
-    UserInterface.show_activation_success(android_id, time_left)
-    print(f"{Colors.GREEN}🎯 Lancement du bot...{Colors.END}\n")
+    clear_screen()
+    print_banner()
     
-    # Démarre la surveillance
-    monitor = Monitor(server_manager, android_id)
-    monitor.start()
+    print(f"{Colors.CYAN}╔{'═'*68}{Colors.CYAN}╗{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END} {get_greeting()} {Colors.GITHUB} GitHub: Juana-archer/Smmkingdomcontrol {Colors.SPARKLES} {Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}╚{'═'*68}{Colors.CYAN}╝{Colors.END}\n")
     
-    # Exécute le task.py
-    executor = TaskExecutor(android_id)
-    success = executor.execute()
+    try:
+        # Lance la boucle asynchrone
+        success = asyncio.run(run_program())
+        
+        if success:
+            print_separator(Colors.GREEN, "=")
+            _orig_print(f"\n{Colors.GREEN}{Colors.SPARKLES} PROGRAMME EXÉCUTÉ AVEC SUCCÈS {Colors.SPARKLES}{Colors.END}\n")
+            print_separator(Colors.GREEN, "=")
+        else:
+            print_separator(Colors.RED, "=")
+            _orig_print(f"\n{Colors.RED}❌ ÉCHEC DE L'EXÉCUTION{Colors.END}\n")
+            print_separator(Colors.RED, "=")
+            
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}⏹️ Interrompu par l'utilisateur{Colors.END}")
+    except Exception as e:
+        print(f"\n{Colors.RED}❌ Erreur: {e}{Colors.END}")
     
-    if not success:
-        Logger.warning("Aucune fonction principale trouvée dans task.py")
-    
-    Logger.log("\n" + "="*70)
-    Logger.log("Bot terminé - Pour relancer: python3 run_bot.py")
-    Logger.log("="*70)
+    print(f"\n{Colors.CYAN}{'★'*70}{Colors.END}")
+    print(f"{Colors.MAGENTA}🏁 FIN DU PROGRAMME - Merci d'utiliser SMM Bot{Colors.END}")
+    print(f"{Colors.CYAN}{'★'*70}{Colors.END}")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n\n{Colors.YELLOW}👋 Arrêt du bot - À bientôt !{Colors.END}")
-    except Exception as e:
-        Logger.error(f"Erreur fatale: {e}")
-        import traceback
-        traceback.print_exc()
-        input("\nAppuyez sur Entrée pour quitter...")
+    main()
